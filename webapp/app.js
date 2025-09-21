@@ -5,7 +5,19 @@
   }
 
   const initData = tg ? tg.initData : null;
-  const headers = initData ? { 'X-Telegram-Init': initData, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+
+  // Show message if not in Telegram Mini App
+  if (!tg) {
+    document.getElementById('status').textContent = 'Открой через Telegram Mini App в боте';
+    document.getElementById('openBtn').disabled = true;
+    return;
+  }
+
+  function getHeaders() {
+    const tgw = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    const id = tgw && typeof tgw.initData === 'string' ? tgw.initData : '';
+    return { 'X-Telegram-Init': id, 'Content-Type': 'application/json' };
+  }
 
   const statusEl = document.getElementById('status');
   const countEl = document.getElementById('count');
@@ -77,7 +89,7 @@
     const b = map.getBounds();
     const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
     try {
-      const res = await fetch(`/api/v1/circles?bbox=${encodeURIComponent(bbox)}`, { headers });
+      const res = await fetch(`/api/v1/circles?bbox=${encodeURIComponent(bbox)}`, { headers: getHeaders() });
       if (res.status === 401) {
         setStatus('Открой через бота (нет initData)');
         return;
@@ -107,7 +119,7 @@
       try {
         const res = await fetch('/api/v1/visit', {
           method: 'POST',
-          headers,
+          headers: getHeaders(),
           body: JSON.stringify({ lat: latitude, lon: longitude })
         });
         if (res.status === 401) { setStatus('Открой через бота'); return; }
