@@ -173,7 +173,11 @@
   async function updateCirclesFromServer() {
     if (isFetching) return;
     isFetching = true;
-    if (loader) loader.style.display = 'flex';
+
+    const loaderTimeout = setTimeout(() => {
+      if (loader) loader.style.display = 'flex';
+    }, 300); // Only show loader if request takes > 300ms
+
     try {
       const bounds = map.getBounds();
       const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(',');
@@ -194,6 +198,7 @@
       console.error('[fog] Failed to fetch circles:', error);
     } finally {
       isFetching = false;
+      clearTimeout(loaderTimeout);
       if (loader) loader.style.display = 'none';
     }
   }
