@@ -53,6 +53,8 @@ if not TELEGRAM_BOT_TOKEN:
 
 # Debug mode toggle: when enabled, only debug auth endpoints are active
 DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "0") == "1"
+# No-auth local mode: bypass Telegram auth and use a fixed local user
+NO_AUTH_MODE = os.getenv("NO_AUTH_MODE", "0") == "1"
 
 
 def verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 86400) -> Dict:
@@ -110,8 +112,18 @@ class CirclesResponse(BaseModel):
     circles: List[Circle]
 
 
+class RadiusRequest(BaseModel):
+    radius_m: int = Field(..., ge=1, le=1000)
+
 async def get_current_user(request: Request, telegram_init: Optional[str] = Header(default=None, alias="X-Telegram-Init")) -> Tuple[int, Optional[str]]:
     logger.info("Authenticating user")
+
+    # 0) No-auth local mode (for development only)
+    if NO_AUTH_MODE:
+        conn = db_module.get_connection()
+        user_id = db_module.ensure_user(conn, tg_id=999_999_999, username="local")
+        logger.warning("NO_AUTH_MODE enabled: bypassing auth, using local user")
+        return user_id, "local"
 
     # 1) Try session-based auth (set by /api/auth)
     if request.session.get("tg_authenticated") and request.session.get("tg_user_id"):
@@ -322,6 +334,22 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
     return CirclesResponse(circles=items)
 
 
+@app.delete("/api/v1/circle")
+async def delete_circle(lat: float, lon: float, user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    deleted = db_module.delete_circle_by_latlon(conn, user_id=user_id, lat=lat, lon=lon)
+    return {"deleted": int(deleted)}
+
+
+@app.post("/api/v1/radius")
+async def set_radius(body: RadiusRequest, user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    updated = db_module.update_radius_for_user(conn, user_id=user_id, radius_m=int(body.radius_m))
+    return {"updated": int(updated)}
+
+
 # -------------------------
 # Debug auth endpoints
 # -------------------------
@@ -365,5 +393,14 @@ async def debug_me(request: Request):
 @app.get("/api/ping")
 async def ping():
     return {"ok": True}
+
+
+@app.get("/api/v1/debug-mode")
+async def debug_mode():
+    """Return debug mode status for frontend"""
+    return {
+        "debug_auth_mode": DEBUG_AUTH_MODE,
+        "no_auth_mode": NO_AUTH_MODE
+    }
 
 

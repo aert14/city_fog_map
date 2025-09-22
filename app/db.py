@@ -114,3 +114,39 @@ def select_circles_in_bbox(
     return [(float(r[0]), float(r[1]), int(r[2])) for r in cur.fetchall()]
 
 
+
+def delete_circle_by_latlon(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    lat: float,
+    lon: float,
+) -> int:
+    cur = conn.execute(
+        """
+        DELETE FROM circles
+        WHERE user_id = ? AND ABS(lat - ?) < 1e-7 AND ABS(lon - ?) < 1e-7
+        """,
+        (user_id, float(lat), float(lon)),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def update_radius_for_user(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    radius_m: int,
+) -> int:
+    cur = conn.execute(
+        """
+        UPDATE circles
+        SET radius_m = ?
+        WHERE user_id = ?
+        """,
+        (int(radius_m), int(user_id)),
+    )
+    conn.commit()
+    return cur.rowcount
+

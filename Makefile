@@ -4,7 +4,7 @@ SHELL := /bin/bash
 PROJECT_ROOT := /home/aert141414/city_fog_map
 VENV := $(PROJECT_ROOT)/.venv
 
-.PHONY: help venv backend backend-debug tunnel tunnel-status password kill
+.PHONY: help venv backend backend-debug backend-wo-auth tunnel tunnel-status password kill
 
 help:
 	@echo "Targets:"
@@ -26,7 +26,10 @@ backend: venv
 	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 backend-debug: venv
+backend-wo-auth: venv
 	@test -n "$$TELEGRAM_BOT_TOKEN" || (echo "TELEGRAM_BOT_TOKEN is required" && exit 1)
+	@echo "Running backend with NO_AUTH_MODE=1 on :8000 (attached)"
+	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env NO_AUTH_MODE=1 TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
 	@echo "Running backend in DEBUG_AUTH_MODE=1 on :8000 (attached)"
 	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env DEBUG_AUTH_MODE=1 TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
 

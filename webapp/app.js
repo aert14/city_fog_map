@@ -1,286 +1,275 @@
 (function(){
   const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  if (tg) {
-    try { tg.ready(); } catch (_) {}
-  }
+  if (tg) { try { tg.ready(); } catch (_) {} }
 
-  const initData = tg ? tg.initData : null;
-
-  // Show message if not in Telegram Mini App
-  if (!tg) {
-    document.getElementById('status').textContent = 'Открой через Telegram Mini App в боте';
-    document.getElementById('openBtn').disabled = true;
-    return;
-  }
-
-  function getHeaders() {
-    const tgw = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-    const id = tgw && typeof tgw.initData === 'string' ? tgw.initData : '';
-    return { 'X-Telegram-Init': id, 'Content-Type': 'application/json' };
-  }
-
-  const statusEl = document.getElementById('status');
-  const countEl = document.getElementById('count');
+  // --- UI & Config ---
   const openBtn = document.getElementById('openBtn');
-  const fogToggle = document.getElementById('fogToggle');
-  let fogEnabled = true;
+  const toggleFogBtn = document.getElementById('toggleFogBtn');
+  const countEl = document.getElementById('count');
+  const statusEl = document.getElementById('status');
+  const fogCanvas = document.getElementById('fog-canvas');
+  const fogCtx = fogCanvas.getContext('2d');
+  const FOG_COLOR = '#1a1a1a';
 
-  // CARTO Positron GL (без политических акцентов)
-  const primaryStyle = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
-
+  // --- Map Initialization ---
   const map = new maplibregl.Map({
     container: 'map',
-    style: primaryStyle,
-    center: [37.6173, 55.7558], // Moscow fallback
-    zoom: 12
+    style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
+    center: [37.6173, 55.7558],
+    zoom: 12,
+    maxBounds: [[36.0, 55.0], [39.0, 56.5]]
   });
-
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
-
-  // Геолокация: кнопка + маркер текущего положения
   const geolocate = new maplibregl.GeolocateControl({
     positionOptions: { enableHighAccuracy: true },
-    trackUserLocation: true,
-    showUserHeading: true
+    trackUserLocation: false,
+    showUserHeading: true,
+    showAccuracyCircle: false, // <--- УБЕДИТЕСЬ, ЧТО ЭТА СТРОКА ЕСТЬ И У НЕЁ ЗНАЧЕНИЕ 'false'
+    fitBoundsOptions: {
+      maxZoom: 22 // Установите желаемый максимальный уровень масштабирования
+  }
   });
-  map.addControl(geolocate);
-
-  const circles = { type: 'FeatureCollection', features: [] };
-
-  function toFeature(lon, lat, radius) {
-    return {
-      type: 'Feature',
-      properties: { radius_m: radius },
-      geometry: { type: 'Polygon', coordinates: [circleCoordinates(lon, lat, radius, 64)] }
-    };
-  }
-
-  function signedArea(ring) {
-    // Shoelace formula in lon/lat plane (sufficient for orientation)
-    let sum = 0;
-    for (let i = 0, n = ring.length - 1; i < n; i++) {
-      const [x1, y1] = ring[i];
-      const [x2, y2] = ring[i + 1];
-      sum += (x1 * y2 - x2 * y1);
-    }
-    return sum; // >0 → CCW, <0 → CW
-  }
-
-  function ensureOrientation(ring, wantCCW) {
-    if (!Array.isArray(ring) || ring.length < 4) return ring;
-    const closed = (ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]);
-    const r = closed ? ring.slice(0, -1) : ring.slice();
-    const isCCW = signedArea(r) > 0;
-    const oriented = (wantCCW === isCCW) ? r : r.reverse();
-    oriented.push(oriented[0]);
-    return oriented;
-  }
-
-  function buildFogFromCircles() {
-    const outer = [
-      [-179.999, -85.0],
-      [179.999, -85.0],
-      [179.999, 85.0],
-      [-179.999, 85.0],
-      [-179.999, -85.0]
-    ];
-  // MapLibre right-hand rule: outer CW, holes CCW
-  const outerOriented = ensureOrientation(outer, false); // CW
-  const holes = circles.features
-    .map(f => (f && f.geometry && f.geometry.type === 'Polygon' && f.geometry.coordinates[0]) ? ensureOrientation(f.geometry.coordinates[0], true) : null) // CCW
-    .filter(Boolean);
+  // Отключаем внутренние перемещения камеры у GeolocateControl
   try {
-    const outerArea = (function(){
-      const r = outerOriented.slice(0, -1);
-      let s = 0; for (let i=0;i<r.length-1;i++){ const [x1,y1]=r[i], [x2,y2]=r[i+1]; s += x1*y2 - x2*y1; }
-      return s;
-    })();
-    const firstHoleArea = holes[0] ? (function(){ const rr = holes[0].slice(0, -1); let s=0; for (let i=0;i<rr.length-1;i++){ const [x1,y1]=rr[i], [x2,y2]=rr[i+1]; s += x1*y2 - x2*y1; } return s; })() : null;
-    console.log('[fog] build holes', { count: holes.length, outerCW: outerArea < 0, firstHoleCCW: firstHoleArea != null ? firstHoleArea > 0 : null });
-  } catch(_) {}
-    return {
-      type: 'FeatureCollection',
-      features: [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [outerOriented, ...holes] } }]
-    };
-  }
-
-  function circleCoordinates(lon, lat, radiusMeters, steps) {
-    const coords = [];
-    const R = 6371000; // meters
-    const latRad = lat * Math.PI / 180;
-    const lonRad = lon * Math.PI / 180;
-    for (let i = 0; i <= steps; i++) {
-      const bearing = 2 * Math.PI * i / steps;
-      const angDist = radiusMeters / R;
-      const lat2 = Math.asin(Math.sin(latRad) * Math.sin(angDist) + Math.cos(latRad) * Math.cos(angDist) * Math.cos(bearing));
-      const lon2 = lonRad + Math.atan2(Math.sin(bearing) * Math.sin(angDist) * Math.cos(latRad), Math.cos(angDist) - Math.sin(latRad) * Math.sin(lat2));
-      coords.push([lon2 * 180 / Math.PI, lat2 * 180 / Math.PI]);
+    if (geolocate && geolocate._updateCamera) {
+      geolocate._updateCamera = function(){};
     }
-    return coords;
-  }
+  } catch (_) {}
+  map.addControl(geolocate);
+  // --- State ---
+  const allKnownCircles = new Map();
+  let isFetching = false;
+  let fogEnabled = true;
+  let noAuthMode = false;
 
-  function updateCirclesSource() {
-    const src = map.getSource('circles');
-    if (src) src.setData(circles);
-    const fsrc = map.getSource('fog');
-    if (fsrc) {
-      const fogData = buildFogFromCircles();
-      try {
-        const holesCount = (fogData && fogData.features && fogData.features[0] && fogData.features[0].geometry && fogData.features[0].geometry.coordinates) ? (fogData.features[0].geometry.coordinates.length - 1) : 0;
-        console.log('[fog] update setData holes', holesCount);
-      } catch(_) {}
-      fsrc.setData(fogData);
-    }
-  }
-
-  // Нет отката стиля: используем только primaryStyle
-
-  map.on('load', () => {
-    map.addSource('circles', { type: 'geojson', data: circles });
-
-    // Fog of war overlay (world polygon with holes for visited circles)
-    map.addSource('fog', { type: 'geojson', data: buildFogFromCircles() });
-    // Полупрозрачная дымка без паттерна
-    map.addLayer({ id: 'fog-bg', type: 'fill', source: 'fog', paint: { 'fill-color': '#0b1220', 'fill-opacity': 0.65, 'fill-antialias': true }, layout: { 'visibility': fogEnabled ? 'visible' : 'none' } });
-
-    map.addLayer({ id: 'circles-outline', type: 'line', source: 'circles', paint: { 'line-color': '#94a3b8', 'line-width': 1.5 } });
-
-    // Стартуем автоопределение местоположения и ставим маркер
-    try { geolocate.trigger(); } catch (_) {}
-    tryLocateCenter();
-    hideBoundaries();
-    fetchVisible();
-    updateFogUi();
-  });
-
-  // Убираем границы стран/административные линии
-  function hideBoundaries() {
+  // --- Debug Mode Detection ---
+  async function checkDebugMode() {
     try {
-      const style = map.getStyle && map.getStyle();
-      if (!style || !style.layers) return;
-      for (const layer of style.layers) {
-        const id = layer && layer.id ? String(layer.id) : '';
-        const srcLayer = layer && layer['source-layer'] ? String(layer['source-layer']) : '';
-        const type = layer && layer.type ? String(layer.type) : '';
-        const name = (id + ' ' + srcLayer).toLowerCase();
-        if (
-          name.includes('boundary') ||
-          name.includes('admin') ||
-          name.includes('country') ||
-          name.includes('state') ||
-          name.includes('province')
-        ) {
-          try { map.setLayoutProperty(id, 'visibility', 'none'); } catch (_) {}
-          if (type === 'line') {
-            try { map.setPaintProperty(id, 'line-opacity', 0); } catch (_) {}
-          }
-        }
+      const response = await fetch('/api/v1/debug-mode');
+      const data = await response.json();
+      noAuthMode = data.no_auth_mode;
+      if (noAuthMode) {
+        toggleFogBtn.style.display = 'inline-block';
       }
-    } catch (_) {}
-  }
-
-  // При смене стиля (например, откат на резервный) — повторно скрыть границы
-  map.on('styledata', () => { hideBoundaries(); });
-
-  function updateFogUi() {
-    if (!fogToggle) return;
-    fogToggle.textContent = `Туман: ${fogEnabled ? 'вкл' : 'выкл'}`;
-  }
-
-  function applyFogVisibility() {
-    try { map.setLayoutProperty('fog-bg', 'visibility', fogEnabled ? 'visible' : 'none'); } catch(_) {}
-    updateFogUi();
-  }
-
-  if (fogToggle) {
-    fogToggle.addEventListener('click', () => { fogEnabled = !fogEnabled; applyFogVisibility(); });
-  }
-
-  function setStatus(msg) { statusEl.textContent = msg || ''; }
-
-  function tryLocateCenter() {
-    if (!navigator.geolocation) return;
-    console.log('[geo] getCurrentPosition: requesting…');
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        console.log('[geo] getCurrentPosition: ok', { latitude, longitude, accuracy: pos.coords.accuracy });
-        map.flyTo({ center: [longitude, latitude], zoom: 15 });
-      },
-      (err) => {
-        console.warn('[geo] getCurrentPosition: error', err && { code: err.code, message: err.message });
-      },
-      { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
-    );
-  }
-
-  async function fetchVisible() {
-    const b = map.getBounds();
-    const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
-    try {
-      const hdr = getHeaders();
-      console.log('[net] GET /api/v1/circles', { bbox, initLen: (hdr['X-Telegram-Init'] || '').length });
-      const res = await fetch(`/api/v1/circles?bbox=${encodeURIComponent(bbox)}`, { headers: hdr });
-      if (res.status === 401) {
-        setStatus('Открой через бота (нет initData)');
-        return;
-      }
-      if (!res.ok) throw new Error('Circles error');
-      const data = await res.json();
-      circles.features = data.circles.map(c => toFeature(c.lon, c.lat, c.radius_m));
-      updateCirclesSource();
-    } catch (e) {
-      console.error(e);
-      setStatus('Ошибка загрузки кругов');
+    } catch (error) {
+      console.warn('[debug] Failed to check debug mode:', error);
     }
   }
 
-  map.on('moveend', fetchVisible);
+  // Check debug mode on startup
+  checkDebugMode();
 
-  openBtn.addEventListener('click', async () => {
-    if (!navigator.geolocation) {
-      setStatus('Нет доступа к геолокации');
+  // --- Core Drawing Logic ---
+  function drawFog() {
+    if (!fogEnabled) {
+      fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
       return;
     }
+
+    fogCtx.fillStyle = FOG_COLOR;
+    fogCtx.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
+    fogCtx.globalCompositeOperation = 'destination-out';
+    allKnownCircles.forEach(circle => {
+      const centerPixels = map.project([circle.lon, circle.lat]);
+      const edgeLonLat = [circle.lon + 0.001, circle.lat];
+      const edgePixels = map.project(edgeLonLat);
+      const pixelsPerLonDegree = Math.abs(edgePixels.x - centerPixels.x) / 0.001;
+      const metersPerDegree = 111320 * Math.cos(circle.lat * Math.PI / 180);
+      const radiusPixels = (circle.radius_m / metersPerDegree) * pixelsPerLonDegree;
+      fogCtx.beginPath();
+      fogCtx.arc(centerPixels.x, centerPixels.y, radiusPixels, 0, Math.PI * 2);
+      fogCtx.fillStyle = 'white';
+      fogCtx.fill();
+    });
+    fogCtx.globalCompositeOperation = 'source-over';
+  }
+
+  // --- Data Fetching Logic ---
+  async function updateCirclesFromServer() {
+    if (isFetching) return;
+    isFetching = true;
+    statusEl.textContent = 'Загрузка...';
+    try {
+      const bounds = map.getBounds();
+      const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(',');
+      const response = await fetch(`/api/v1/circles?bbox=${bbox}`, { headers: { 'X-Telegram-Init': tg ? tg.initData : '' } });
+      if (!response.ok) throw new Error(`Network error: ${response.statusText}`);
+      const data = await response.json();
+      let newCircles = 0;
+      data.circles.forEach(c => {
+        const id = `${c.lat},${c.lon}`;
+        if (!allKnownCircles.has(id)) {
+          allKnownCircles.set(id, c);
+          newCircles++;
+        }
+      });
+      if (newCircles > 0) drawFog();
+      countEl.textContent = allKnownCircles.size.toLocaleString();
+    } catch (error) {
+      console.error('[fog] Failed to fetch circles:', error);
+    } finally {
+      isFetching = false;
+      statusEl.textContent = '';
+    }
+  }
+
+  // --- Event Handlers ---
+  map.on('load', () => {
+    const mapContainer = document.getElementById('map-container');
+
+    // --- РЕШЕНИЕ ПРОБЛЕМЫ ---
+    // 1. Находим контейнер с кнопками, который создал MapLibre.
+    const controls = mapContainer.querySelector('.maplibregl-control-container');
+    if (controls) {
+      // 2. "Вынимаем" его из карты и вставляем как прямой дочерний элемент #map-container.
+      // Теперь он является "соседом" карты и холста, а не их "потомком".
+      mapContainer.appendChild(controls);
+    }
+    // -------------------------
+
+    const resizeObserver = new ResizeObserver(() => {
+      fogCanvas.width = mapContainer.clientWidth;
+      fogCanvas.height = mapContainer.clientHeight;
+      drawFog();
+    });
+    resizeObserver.observe(mapContainer);
+    
+    updateCirclesFromServer();
+
+    try { geolocate.trigger(); } catch (e) { console.error(e); }
+  });
+
+  map.on('move', drawFog);
+  map.on('zoom', drawFog);
+  map.on('moveend', updateCirclesFromServer);
+  map.on('zoomend', updateCirclesFromServer);
+  
+  function tryLocateCenter() {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 15 }),
+      (err) => console.warn('[geo] getCurrentPosition error:', err.message)
+    );
+  }
+  let lastKnownPosition = null;
+  // При нажатии кнопки геолокации приближать минимум до целевого зума
+  const TARGET_GEO_ZOOM = 17;
+  geolocate.on('geolocate', (pos) => {
+    lastKnownPosition = pos.coords;
+    const zoom = Math.max(map.getZoom(), TARGET_GEO_ZOOM);
+    map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom });
+  });
+  openBtn.addEventListener('click', async () => {
+    if (!lastKnownPosition) { alert('Местоположение не определено.'); return; }
     openBtn.disabled = true;
-    setStatus('Определяем местоположение…');
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-      const { latitude, longitude } = pos.coords;
-      console.log('[geo] visit position', { latitude, longitude, accuracy: pos.coords.accuracy });
-      setStatus('Отправляем на сервер…');
-      try {
-        const hdr = getHeaders();
-        console.log('[net] POST /api/v1/visit', { initLen: (hdr['X-Telegram-Init'] || '').length, body: { lat: latitude, lon: longitude } });
-        const res = await fetch('/api/v1/visit', {
-          method: 'POST',
-          headers: hdr,
-          body: JSON.stringify({ lat: latitude, lon: longitude })
-        });
-        console.log('[net] /api/v1/visit response', { status: res.status });
-        if (res.status === 401) { setStatus('Открой через бота'); return; }
-        if (!res.ok) throw new Error('Visit error');
-        const data = await res.json();
-        if (data.added === 1) {
-          circles.features.push(toFeature(data.circle.lon, data.circle.lat, data.circle.radius_m));
-          updateCirclesSource();
-        }
-        if (data.stats && typeof data.stats.total_circles === 'number') {
-          countEl.textContent = String(data.stats.total_circles);
-        }
-        map.flyTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 15) });
-        setStatus('Готово');
-      } catch (e) {
-        console.error(e);
-        setStatus('Ошибка запроса');
-      } finally {
-        openBtn.disabled = false;
+    try {
+      const response = await fetch('/api/v1/visit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init': tg ? tg.initData : '' },
+        body: JSON.stringify({ lat: lastKnownPosition.latitude, lon: lastKnownPosition.longitude })
+      });
+      if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+      const result = await response.json();
+      if (result.added > 0) {
+        const c = result.circle;
+        allKnownCircles.set(`${c.lat},${c.lon}`, {lat: c.lat, lon: c.lon, radius_m: c.radius_m});
+        countEl.textContent = allKnownCircles.size.toLocaleString();
+        drawFog();
       }
-    }, (err) => {
-      console.warn(err);
-      setStatus('Дай доступ к геолокации в Telegram');
+    } catch (error) {
+      console.error('[visit] Failed to visit area:', error);
+    } finally {
       openBtn.disabled = false;
-    }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
+    }
+  });
+
+  // --- Fog Toggle Handler ---
+  toggleFogBtn.addEventListener('click', () => {
+    fogEnabled = !fogEnabled;
+    toggleFogBtn.textContent = fogEnabled ? 'Скрыть туман' : 'Показать туман';
+    if (fogEnabled) {
+      drawFog();
+    } else {
+      fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
+    }
+  });
+
+  // --- Debug UI: radius slider + delete mode ---
+  const radiusSlider = document.getElementById('radiusSlider');
+  const radiusValue = document.getElementById('radiusValue');
+  const deleteModeBtn = document.getElementById('deleteModeBtn');
+  const debugPanel = document.getElementById('debugPanel');
+  let deleteMode = false;
+
+  function setDeleteMode(on) {
+    deleteMode = !!on;
+    if (deleteModeBtn) {
+      deleteModeBtn.textContent = deleteMode ? 'Удаление: вкл' : 'Удаление: выкл';
+      deleteModeBtn.style.background = deleteMode ? '#b91c1c' : '#ef4444';
+    }
+  }
+
+  // Показать панель только в noAuthMode
+  (async () => {
+    try {
+      const resp = await fetch('/api/v1/debug-mode');
+      const data = await resp.json();
+      noAuthMode = !!data.no_auth_mode;
+      if (debugPanel) debugPanel.style.display = noAuthMode ? 'flex' : 'none';
+    } catch (_) {}
+  })();
+
+  if (deleteModeBtn) {
+    deleteModeBtn.addEventListener('click', () => setDeleteMode(!deleteMode));
+  }
+
+  if (radiusSlider && radiusValue) {
+    radiusValue.textContent = radiusSlider.value;
+    radiusSlider.addEventListener('input', async () => {
+      radiusValue.textContent = radiusSlider.value;
+      try {
+        const response = await fetch('/api/v1/radius', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init': tg ? tg.initData : '' },
+          body: JSON.stringify({ radius_m: parseInt(radiusSlider.value, 10) })
+        });
+        if (!response.ok) throw new Error('radius update failed');
+        // обновим локально радиусы для визуальной мгновенной обратной связи
+        const newR = parseInt(radiusSlider.value, 10);
+        allKnownCircles.forEach((c, id) => { c.radius_m = newR; allKnownCircles.set(id, c); });
+        drawFog();
+      } catch (e) {
+        console.warn('[debug] radius update error', e);
+      }
+    });
+  }
+
+  // Удаление ближайшей точки по клику в режиме удаления
+  map.on('click', async (e) => {
+    if (!deleteMode) return;
+    let bestId = null;
+    let bestDist = Infinity;
+    allKnownCircles.forEach((c, id) => {
+      const p = map.project([c.lon, c.lat]);
+      const d = Math.hypot(p.x - e.point.x, p.y - e.point.y);
+      if (d < bestDist) { bestDist = d; bestId = id; }
+    });
+    if (!bestId || bestDist > 30) return; // слишком далеко от клика
+    const c = allKnownCircles.get(bestId);
+    try {
+      const response = await fetch(`/api/v1/circle?lat=${c.lat}&lon=${c.lon}`, {
+        method: 'DELETE',
+        headers: { 'X-Telegram-Init': tg ? tg.initData : '' }
+      });
+      if (!response.ok) throw new Error('delete failed');
+      const res = await response.json();
+      if (res.deleted > 0) {
+        allKnownCircles.delete(bestId);
+        countEl.textContent = allKnownCircles.size.toLocaleString();
+        drawFog();
+      }
+    } catch (err) {
+      console.warn('[debug] delete error', err);
+    }
   });
 })();
-
-
