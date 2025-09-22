@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Telegram Mini App Auth Demo</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+      body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+      .card { max-width: 720px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; }
+      .muted { color: #6b7280; }
+      .error { color: #b91c1c; font-weight: 600; }
+      .success { color: #065f46; font-weight: 600; }
+      pre { white-space: pre-wrap; word-break: break-word; background: #f8fafc; padding: 12px; border-radius: 8px; }
+      button { padding: 10px 16px; border-radius: 8px; border: 1px solid #d1d5db; background: #111827; color: white; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Тестовая мини-аппка: проверка аутентификации</h2>
+      <p class="muted">Страница должна открываться только из вебвью Telegram Mini App. Если вы видите ошибку — откройте через кнопку в боте.</p>
+      <div id="status" class="muted">Инициализация…</div>
+      <div id="content" style="display:none">
+        <p class="success">Аутентификация прошла успешно.</p>
+        <pre id="user"></pre>
+      </div>
+      <div id="error" style="display:none" class="error"></div>
+      <div style="margin-top:16px">
+        <button id="retry" style="display:none">Повторить попытку</button>
+      </div>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const errorEl = document.getElementById('error');
+      const contentEl = document.getElementById('content');
+      const userEl = document.getElementById('user');
+      const retryBtn = document.getElementById('retry');
+
+      function showError(msg) {
+        statusEl.style.display = 'none';
+        contentEl.style.display = 'none';
+        errorEl.style.display = 'block';
+        retryBtn.style.display = 'inline-block';
+        errorEl.textContent = msg;
+      }
+
+      async function authenticate() {
+        try {
+          if (!window.Telegram || !window.Telegram.WebApp) {
+            showError('Среда Telegram WebApp не обнаружена. Откройте через бота.');
+            return;
+          }
+
+          const initData = window.Telegram.WebApp.initData || '';
+          if (!initData) {
+            showError('Отсутствует initData. Откройте через кнопку WebApp в Telegram.');
+            return;
+          }
+
+          window.Telegram.WebApp.ready();
+
+          statusEl.textContent = 'Проверяем подпись…';
+          const res = await fetch('/api/auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData }),
+          });
+
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            showError('Доступ запрещён: ' + (data.error || res.status));
+            return;
+          }
+
+          statusEl.textContent = 'Пинг…';
+          const pingRes = await fetch('/api/ping');
+          if (!pingRes.ok) {
+            showError('Ping failed: ' + pingRes.status);
+            return;
+          }
+
+          statusEl.textContent = 'Загружаем профиль…';
+          const meRes = await fetch('/api/me', { credentials: 'include' });
+          const me = await meRes.json();
+          contentEl.style.display = 'block';
+          statusEl.style.display = 'none';
+          userEl.textContent = JSON.stringify(me.user, null, 2);
+        } catch (e) {
+          showError('Ошибка: ' + (e && e.message ? e.message : e));
+        }
+      }
+
+      retryBtn.addEventListener('click', authenticate);
+      authenticate();
+    </script>
+  </body>
+  </html>
+
+

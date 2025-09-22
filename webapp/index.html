@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>City Fog Map</title>
+    <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>
+      html, body { 
+        height: 100%; 
+        margin: 0; 
+        overflow: hidden;
+      }
+      #app { 
+        display: flex; 
+        flex-direction: column; 
+        height: 100%; 
+      }
+      #toolbar { 
+        padding: 8px; 
+        display: flex; 
+        gap: 8px; 
+        align-items: center; 
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1); 
+        z-index: 10;
+        flex-shrink: 0;
+      }
+      
+      #map-container {
+        position: relative;
+        flex: 1;
+      }
+      
+      #map {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 1; /* Карта - самый нижний слой */
+      }
+
+      #fog-canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        z-index: 2; /* Туман - средний слой */
+        pointer-events: none; 
+      }
+
+      /* После того как JS переместит этот контейнер, это правило сработает */
+      .maplibregl-control-container {
+        z-index: 3; /* Кнопки - самый верхний слой */
+      }
+
+      .btn { background: #4f46e5; color: white; border: 0; padding: 8px 12px; border-radius: 6px; font-size: 14px; cursor: pointer; }
+      .btn:disabled { opacity: .6; cursor: default; }
+      #status { font-size: 13px; color: #555; }
+      #count { font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="toolbar">
+        <button id="openBtn" class="btn">Открыть 50 м вокруг</button>
+        <button id="toggleFogBtn" class="btn" style="display: none;">Скрыть туман</button>
+        <span id="status"></span>
+        <span>Открыто: <span id="count">0</span></span>
+        <div id="debugPanel" style="display: none; margin-left: 12px; display: flex; align-items: center; gap: 8px;">
+          <label for="radiusSlider" style="font-size: 13px; color: #333;">Радиус (м): <span id="radiusValue">50</span></label>
+          <input id="radiusSlider" type="range" min="10" max="200" step="5" value="50" />
+          <button id="deleteModeBtn" class="btn" style="background: #ef4444;">Удаление: выкл</button>
+        </div>
+      </div>
+
+      <div id="map-container">
+        <div id="map"></div>
+        <canvas id="fog-canvas"></canvas>
+      </div>
+    </div>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script src="/webapp/app.js"></script>
+  </body>
+</html>
