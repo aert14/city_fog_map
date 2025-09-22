@@ -36,11 +36,10 @@
   const fogCtx = fogCanvas.getContext('2d');
   // Fog configuration
   const FOG_CONFIG = {
-    baseColor: '#2a2a2a',
-    gradientColors: ['rgba(42, 42, 42, 0.9)', 'rgba(32, 32, 32, 0.7)', 'rgba(22, 22, 22, 0.5)', 'rgba(15, 15, 15, 0.3)'],
-    blurAmount: 2,
+    baseColor: 'rgba(42, 42, 42, 0.95)',
+    blurAmount: 4, // Increased blur for a softer look
     animationSpeed: 0.001,
-    pulseAmplitude: 0.1
+    pulseAmplitude: 0.05
   };
 
   // Animation state
@@ -90,25 +89,13 @@
       return;
     }
 
-    // Create layered fog effect with animation
-    const layers = FOG_CONFIG.gradientColors.length;
-    const layerHeight = fogCanvas.height / layers;
-    const pulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed) * FOG_CONFIG.pulseAmplitude;
-
-    for (let i = 0; i < layers; i++) {
-      const animatedLayerHeight = layerHeight * pulse;
-      const yOffset = i * layerHeight + (layerHeight - animatedLayerHeight) / 2;
-
-      const gradient = fogCtx.createLinearGradient(0, yOffset, 0, yOffset + animatedLayerHeight);
-      gradient.addColorStop(0, FOG_CONFIG.gradientColors[i]);
-      gradient.addColorStop(1, FOG_CONFIG.gradientColors[Math.min(i + 1, layers - 1)]);
-
-      fogCtx.fillStyle = gradient;
-      fogCtx.fillRect(0, yOffset, fogCanvas.width, animatedLayerHeight);
-    }
+    // A single, uniform fog layer
+    fogCtx.fillStyle = FOG_CONFIG.baseColor;
+    fogCtx.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
 
     // Apply blur for fog effect
     if (FOG_CONFIG.blurAmount > 0) {
+      // We draw the canvas onto itself to apply the blur
       fogCtx.filter = `blur(${FOG_CONFIG.blurAmount}px)`;
       fogCtx.drawImage(fogCanvas, 0, 0);
       fogCtx.filter = 'none';
@@ -125,7 +112,7 @@
       const radiusPixels = (circle.radius_m / metersPerDegree) * pixelsPerLonDegree;
 
       // Add slight pulsing to circles for more dynamic effect
-      const circlePulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + circle.lat * 10 + circle.lon * 10) * 0.05;
+      const circlePulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + circle.lat * 10 + circle.lon * 10) * FOG_CONFIG.pulseAmplitude;
       const animatedRadius = radiusPixels * circlePulse;
 
       // Create radial gradient for smooth edges
