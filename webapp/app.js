@@ -36,8 +36,17 @@
   const fogCtx = fogCanvas.getContext('2d');
   // Fog configuration
   const FOG_CONFIG = {
-    baseColor: 'rgba(42, 42, 42, 0.95)',
-    blurAmount: 4, // Increased blur for a softer look
+    // Base fog layer
+    baseAlpha: 0.6, // Base alpha for the initial fog fill
+    baseColor: 'rgb(42, 42, 42)', // Base color, alpha is now separate
+
+    // Noise properties
+    noiseScale: 0.05, // Smaller value = larger noise features
+    noiseIntensity: 0.3, // How visible the noise is (0 to 1)
+    driftSpeed: 0.00005, // How fast the noise pattern moves
+
+    // Hexagon reveal properties
+    blurAmount: 4,
     animationSpeed: 0.001,
     pulseAmplitude: 0.05
   };
@@ -45,6 +54,10 @@
   // Animation state
   let animationTime = 0;
   let animationFrameId = null;
+  // --- FPS Throttling ---
+  let then = 0;
+  const FPS = 25; // Target FPS
+  const FPS_INTERVAL = 1000 / FPS;
 
   // --- Map Initialization ---
   const map = new maplibregl.Map({
@@ -86,26 +99,77 @@
   }
 
   // --- Core Drawing Logic ---
+
+  /**
+   * Creates a canvas with a seamless, tileable noise pattern.
+   * @param {number} width
+   * @param {number} height
+   * @param {number} scale - Determines the "zoom" level of the noise.
+   * @returns {OffscreenCanvas}
+   */
+  function createNoisePattern(width, height, scale) {
+    const noiseCanvas = new OffscreenCanvas(width, height);
+    const noiseCtx = noiseCanvas.getContext('2d');
+    const imageData = noiseCtx.createImageData(width, height);
+    const data = imageData.data;
+
+    // A simple pseudo-random number generator for deterministic noise
+    let seed = 1;
+    function random() {
+      const x = Math.sin(seed++) * 10000;
+      return x - Math.floor(x);
+    }
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        // Using a simple random function for noise
+        const value = Math.floor(random() * 255);
+        const index = (y * width + x) * 4;
+        data[index] = value;
+        data[index + 1] = value;
+        data[index + 2] = value;
+        data[index + 3] = 255; // Alpha
+      }
+    }
+    noiseCtx.putImageData(imageData, 0, 0);
+    return noiseCanvas;
+  }
+
+  const noisePattern = createNoisePattern(100, 100, FOG_CONFIG.noiseScale);
+
+
   function drawFog() {
     if (!fogEnabled) {
       fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
       return;
     }
 
-    // A single, uniform fog layer
+    const width = fogCanvas.width;
+    const height = fogCanvas.height;
+
+    // 1. Base fog layer
+    fogCtx.globalCompositeOperation = 'source-over';
     fogCtx.fillStyle = FOG_CONFIG.baseColor;
-    fogCtx.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
+    fogCtx.globalAlpha = FOG_CONFIG.baseAlpha;
+    fogCtx.fillRect(0, 0, width, height);
+    fogCtx.globalAlpha = 1.0; // Reset alpha
 
-    // Apply blur for fog effect
-    if (FOG_CONFIG.blurAmount > 0) {
-      // We draw the canvas onto itself to apply the blur
-      fogCtx.filter = `blur(${FOG_CONFIG.blurAmount}px)`;
-      fogCtx.drawImage(fogCanvas, 0, 0);
-      fogCtx.filter = 'none';
-    }
-
-    // Clear areas where fog has been "dispelled" with hexagon shapes
+    // 2. Subtract noise from the base fog
     fogCtx.globalCompositeOperation = 'destination-out';
+    const pattern = fogCtx.createPattern(noisePattern, 'repeat');
+    fogCtx.fillStyle = pattern;
+
+    // Animate the drift
+    const dx = (animationTime * FOG_CONFIG.driftSpeed * width) % noisePattern.width;
+    const dy = (animationTime * FOG_CONFIG.driftSpeed * height) % noisePattern.height;
+    fogCtx.save();
+    fogCtx.translate(dx, dy);
+    fogCtx.globalAlpha = FOG_CONFIG.noiseIntensity;
+    fogCtx.fillRect(-dx, -dy, width, height);
+    fogCtx.restore();
+
+    // 3. Clear areas where fog has been "dispelled" with hexagon shapes
+    // This operation is still 'destination-out'
     allKnownHexagons.forEach(hexId => {
       try {
         const boundary = h3.cellToBoundary(hexId);
@@ -161,15 +225,27 @@
 
   // Animation loop
   function animateFog() {
-    if (fogEnabled) {
-      animationTime += 1;
+    // The loop is controlled by start/stop functions.
+    // We request the next frame first.
+    animationFrameId = requestAnimationFrame(animateFog);
+
+    // Check if enough time has passed to draw the next frame.
+    const now = performance.now();
+    const elapsed = now - then;
+
+    if (elapsed > FPS_INTERVAL) {
+      // Adjust 'then' to maintain a consistent framerate, preventing drift.
+      then = now - (elapsed % FPS_INTERVAL);
+
+      // Run the core animation and drawing logic.
+      animationTime++;
       drawFog();
-      animationFrameId = requestAnimationFrame(animateFog);
     }
   }
 
   function startFogAnimation() {
     if (fogEnabled && !animationFrameId) {
+      then = performance.now(); // Reset timer.
       animateFog();
     }
   }
