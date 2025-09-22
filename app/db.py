@@ -66,14 +66,20 @@ def ensure_user(conn: sqlite3.Connection, tg_id: int, username: Optional[str]) -
 
 
 def insert_circle_if_new(
-    conn: sqlite3.Connection, *, user_id: int, geokey: str, lat: float, lon: float
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    geokey: str,
+    lat: float,
+    lon: float,
+    radius_m: int,
 ) -> bool:
     cur = conn.execute(
         """
-        INSERT OR IGNORE INTO circles (user_id, geokey, lat, lon)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO circles (user_id, geokey, lat, lon, radius_m)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (user_id, geokey, float(lat), float(lon)),
+        (user_id, geokey, float(lat), float(lon), int(radius_m)),
     )
     conn.commit()
     return cur.rowcount > 0

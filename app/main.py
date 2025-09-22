@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List, Dict
 
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -175,7 +175,36 @@ async def shutdown_event():
 webapp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp")
 if not os.path.isdir(webapp_dir):
     os.makedirs(webapp_dir, exist_ok=True)
-app.mount("/webapp", StaticFiles(directory=webapp_dir, html=True), name="webapp")
+class LongCacheStatic(StaticFiles):
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        # Index handled separately; here set long cache for assets
+        if response.status_code == 200 and response.media_type != "text/html":
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        return response
+
+app.mount("/webapp", LongCacheStatic(directory=webapp_dir, html=True), name="webapp")
+
+# Version for cache-busting static assets
+APP_VERSION = os.getenv("APP_VERSION")
+if not APP_VERSION:
+    try:
+        app_js_path = os.path.join(webapp_dir, "app.js")
+        APP_VERSION = str(int(os.path.getmtime(app_js_path)))
+    except Exception:
+        APP_VERSION = str(int(time.time()))
+
+def _read_index_with_version() -> str:
+    index_path = os.path.join(webapp_dir, "index.html")
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        # inject version to app.js
+        html = html.replace("/webapp/app.js", f"/webapp/app.js?v={APP_VERSION}")
+        return html
+    except Exception as e:
+        logger.error(f"Failed to read index.html: {e}")
+        return "<html><body>index missing</body></html>"
 
 # Redirect root to the appropriate page
 @app.get("/")
@@ -207,13 +236,20 @@ async def log_requests(request: Request, call_next):
         f"ua='{ua[:120]}' ref='{ref[:160]}' origin='{origin[:120]}' "
         f"tg_init_present={bool(init_header)} tg_init_len={init_len} tg_init_sha256={init_hash or '-'}"
     )
+    response = None
+    error: Exception | None = None
     try:
         response = await call_next(request)
         return response
+    except Exception as exc:
+        error = exc
+        raise
     finally:
         duration_ms = (time.perf_counter() - start_time) * 1000.0
+        status_code = getattr(response, "status_code", 500 if error else "n/a")
+        suffix = f" error={type(error).__name__}" if error else ""
         logger.info(
-            f"HTTP RES {request.method} {path_and_qs} -> {getattr(response, 'status_code', 'n/a')} in {duration_ms:.1f} ms"
+            f"HTTP RES {request.method} {path_and_qs} -> {status_code} in {duration_ms:.1f} ms{suffix}"
         )
 
 
@@ -223,6 +259,13 @@ def on_startup() -> None:
     conn = db_module.get_connection()
     db_module.init_db(conn)
     logger.info("Database initialized successfully")
+
+
+@app.get("/webapp/")
+async def webapp_index() -> Response:
+    html = _read_index_with_version()
+    headers = {"Cache-Control": "no-store"}
+    return Response(content=html, media_type="text/html; charset=utf-8", headers=headers)
 
 
 @app.get("/health")
@@ -240,17 +283,19 @@ async def visit_area(body: VisitRequest, user=Depends(get_current_user)):
     conn = db_module.get_connection()
 
     lat, lon = float(body.lat), float(body.lon)
-    # H3 resolution approximately ~100m per hexagon
-    resolution = 11
-    geokey = h3.geo_to_h3(lat, lon, resolution)
+    # Quantization: configurable H3 resolution and circle radius
+    H3_RESOLUTION = int(os.getenv("H3_RESOLUTION", "13"))
+    DEFAULT_RADIUS_M = int(os.getenv("DEFAULT_RADIUS_M", "50"))
+    logger.info(f"Visit quantization: H3_RESOLUTION={H3_RESOLUTION}, DEFAULT_RADIUS_M={DEFAULT_RADIUS_M}")
+    geokey = h3.latlng_to_cell(lat, lon, H3_RESOLUTION)
 
-    added = db_module.insert_circle_if_new(conn, user_id=user_id, geokey=geokey, lat=lat, lon=lon)
+    added = db_module.insert_circle_if_new(conn, user_id=user_id, geokey=geokey, lat=lat, lon=lon, radius_m=DEFAULT_RADIUS_M)
     total = db_module.count_circles(conn, user_id=user_id)
 
     logger.info(f"Visit processed: added={added}, total_circles={total}, geokey={geokey}")
     return VisitResponse(
         added=1 if added else 0,
-        circle=Circle(lat=lat, lon=lon, radius_m=100),
+        circle=Circle(lat=lat, lon=lon, radius_m=DEFAULT_RADIUS_M),
         stats={"total_circles": total},
     )
 
