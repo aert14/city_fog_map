@@ -109,7 +109,7 @@ class VisitResponse(BaseModel):
 
 
 class CirclesResponse(BaseModel):
-    circles: List[Circle]
+    hexagons: List[str]
 
 
 class RadiusRequest(BaseModel):
@@ -295,19 +295,28 @@ async def visit_area(body: VisitRequest, user=Depends(get_current_user)):
     conn = db_module.get_connection()
 
     lat, lon = float(body.lat), float(body.lon)
-    # Quantization: configurable H3 resolution and circle radius
-    H3_RESOLUTION = int(os.getenv("H3_RESOLUTION", "13"))
-    DEFAULT_RADIUS_M = int(os.getenv("DEFAULT_RADIUS_M", "50"))
-    logger.info(f"Visit quantization: H3_RESOLUTION={H3_RESOLUTION}, DEFAULT_RADIUS_M={DEFAULT_RADIUS_M}")
-    geokey = h3.latlng_to_cell(lat, lon, H3_RESOLUTION)
 
-    added = db_module.insert_circle_if_new(conn, user_id=user_id, geokey=geokey, lat=lat, lon=lon, radius_m=DEFAULT_RADIUS_M)
+    # Get user's H3 resolution (based on their radius setting)
+    user_resolution = db_module.get_user_h3_resolution(conn, user_id)
+    if user_resolution is None:
+        # Fallback to default if no user setting
+        user_resolution = int(os.getenv("H3_RESOLUTION", "11"))
+
+    # Get user's radius setting
+    user_radius = db_module.get_user_radius(conn, user_id)
+    if user_radius is None:
+        user_radius = int(os.getenv("DEFAULT_RADIUS_M", "50"))
+
+    logger.info(f"Visit quantization: H3_RESOLUTION={user_resolution}, radius_m={user_radius}")
+    geokey = h3.latlng_to_cell(lat, lon, user_resolution)
+
+    added = db_module.insert_circle_if_new(conn, user_id=user_id, geokey=geokey, lat=lat, lon=lon, radius_m=user_radius)
     total = db_module.count_circles(conn, user_id=user_id)
 
     logger.info(f"Visit processed: added={added}, total_circles={total}, geokey={geokey}")
     return VisitResponse(
         added=1 if added else 0,
-        circle=Circle(lat=lat, lon=lon, radius_m=DEFAULT_RADIUS_M),
+        circle=Circle(lat=lat, lon=lon, radius_m=user_radius),
         stats={"total_circles": total},
     )
 
@@ -328,10 +337,10 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
 
     conn = db_module.get_connection()
     rows = db_module.select_circles_in_bbox(conn, user_id=user_id, min_lat=min_lat, min_lon=min_lon, max_lat=max_lat, max_lon=max_lon)
-    items = [Circle(lat=r[0], lon=r[1], radius_m=int(r[2])) for r in rows]
+    hexagons = [r[3] for r in rows]  # geokey is at index 3
 
-    logger.info(f"Circles response: {len(items)} circles returned")
-    return CirclesResponse(circles=items)
+    logger.info(f"Circles response: {len(hexagons)} hexagons returned")
+    return CirclesResponse(hexagons=hexagons)
 
 
 @app.delete("/api/v1/circle")
@@ -346,8 +355,34 @@ async def delete_circle(lat: float, lon: float, user=Depends(get_current_user)):
 async def set_radius(body: RadiusRequest, user=Depends(get_current_user)):
     user_id, _ = user
     conn = db_module.get_connection()
-    updated = db_module.update_radius_for_user(conn, user_id=user_id, radius_m=int(body.radius_m))
-    return {"updated": int(updated)}
+    radius_m = int(body.radius_m)
+
+    # Map radius to H3 resolution for hexagon size control
+    # Higher radius = lower resolution = larger hexagons
+    if radius_m <= 30:
+        h3_resolution = 13  # Small hexagons (~100m)
+    elif radius_m <= 70:
+        h3_resolution = 12  # Medium-small hexagons (~200m)
+    elif radius_m <= 150:
+        h3_resolution = 11  # Medium hexagons (~400m)
+    else:
+        h3_resolution = 10  # Large hexagons (~800m)
+
+    # Check if resolution changed
+    old_resolution = db_module.get_user_h3_resolution(conn, user_id)
+    resolution_changed = old_resolution != h3_resolution
+
+    # Store both radius and computed H3 resolution
+    updated = db_module.update_radius_and_resolution_for_user(
+        conn, user_id=user_id, radius_m=radius_m, h3_resolution=h3_resolution
+    )
+
+    # If resolution changed, clear all user's hexagon data to avoid conflicts
+    if resolution_changed:
+        db_module.clear_user_circles(conn, user_id)
+        logger.info(f"Cleared all circles for user {user_id} due to H3 resolution change from {old_resolution} to {h3_resolution}")
+
+    return {"updated": int(updated), "h3_resolution": h3_resolution, "resolution_changed": resolution_changed}
 
 
 # -------------------------
