@@ -98,10 +98,10 @@ def select_circles_in_bbox(
     min_lon: float,
     max_lat: float,
     max_lon: float,
-) -> List[Tuple[float, float, int]]:
+) -> List[Tuple[float, float, int, str]]:
     cur = conn.execute(
         """
-        SELECT lat, lon, radius_m
+        SELECT lat, lon, radius_m, geokey
         FROM circles
         WHERE user_id = ?
           AND lat BETWEEN ? AND ?
@@ -111,7 +111,7 @@ def select_circles_in_bbox(
         """,
         (user_id, min_lat, max_lat, min_lon, max_lon),
     )
-    return [(float(r[0]), float(r[1]), int(r[2])) for r in cur.fetchall()]
+    return [(float(r[0]), float(r[1]), int(r[2]), str(r[3])) for r in cur.fetchall()]
 
 
 
@@ -147,6 +147,71 @@ def update_radius_for_user(
         """,
         (int(radius_m), int(user_id)),
     )
+    conn.commit()
+    return cur.rowcount
+
+
+def update_radius_and_resolution_for_user(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    radius_m: int,
+    h3_resolution: int,
+) -> int:
+    # First, ensure user has a record in a user_settings table or similar
+    # For now, we'll store this in a simple key-value approach by updating all user's circles
+    cur = conn.execute(
+        """
+        UPDATE circles
+        SET radius_m = ?
+        WHERE user_id = ?
+        """,
+        (int(radius_m), int(user_id)),
+    )
+
+    # Note: H3 resolution is computed on-the-fly in the application logic
+    # We don't store it in the database, just compute it from radius when needed
+
+    conn.commit()
+    return cur.rowcount
+
+
+def get_user_radius(conn: sqlite3.Connection, user_id: int) -> Optional[int]:
+    """Get the current radius setting for a user"""
+    cur = conn.execute(
+        """
+        SELECT radius_m
+        FROM circles
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else None
+
+
+def get_user_h3_resolution(conn: sqlite3.Connection, user_id: int) -> Optional[int]:
+    """Get the H3 resolution for a user based on their radius setting"""
+    radius = get_user_radius(conn, user_id)
+    if radius is None:
+        return None
+
+    # Map radius to H3 resolution (same logic as in main.py)
+    if radius <= 30:
+        return 13  # Small hexagons (~100m)
+    elif radius <= 70:
+        return 12  # Medium-small hexagons (~200m)
+    elif radius <= 150:
+        return 11  # Medium hexagons (~400m)
+    else:
+        return 10  # Large hexagons (~800m)
+
+
+def clear_user_circles(conn: sqlite3.Connection, user_id: int) -> int:
+    """Clear all circles for a user (used when H3 resolution changes)"""
+    cur = conn.execute("DELETE FROM circles WHERE user_id = ?", (user_id,))
     conn.commit()
     return cur.rowcount
 

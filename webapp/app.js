@@ -72,10 +72,13 @@
   } catch (_) {}
   map.addControl(geolocate);
   // --- State ---
-  const allKnownCircles = new Map();
+  const allKnownHexagons = new Set();
   let isFetching = false;
   let fogEnabled = true;
   let noAuthMode = isNoAuthMode; // Use the value from the initial check
+
+  // Initialize H3 resolution (will be updated by radius slider)
+  window.currentH3Resolution = 11; // Default resolution
 
   // Show toggle fog button in no-auth mode
   if (noAuthMode) {
@@ -101,33 +104,57 @@
       fogCtx.filter = 'none';
     }
 
-    // Clear areas where fog has been "dispelled" with smooth edges
+    // Clear areas where fog has been "dispelled" with hexagon shapes
     fogCtx.globalCompositeOperation = 'destination-out';
-    allKnownCircles.forEach(circle => {
-      const centerPixels = map.project([circle.lon, circle.lat]);
-      const edgeLonLat = [circle.lon + 0.001, circle.lat];
-      const edgePixels = map.project(edgeLonLat);
-      const pixelsPerLonDegree = Math.abs(edgePixels.x - centerPixels.x) / 0.001;
-      const metersPerDegree = 111320 * Math.cos(circle.lat * Math.PI / 180);
-      const radiusPixels = (circle.radius_m / metersPerDegree) * pixelsPerLonDegree;
+    allKnownHexagons.forEach(hexId => {
+      try {
+        const boundary = h3.cellToBoundary(hexId);
+        const center = h3.cellToLatLng(hexId);
 
-      // Add slight pulsing to circles for more dynamic effect
-      const circlePulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + circle.lat * 10 + circle.lon * 10) * FOG_CONFIG.pulseAmplitude;
-      const animatedRadius = radiusPixels * circlePulse;
+        // Convert hexagon boundary to screen coordinates
+        const screenPoints = boundary.map(([lat, lng]) => map.project([lng, lat]));
 
-      // Create radial gradient for smooth edges
-      const gradient = fogCtx.createRadialGradient(
-        centerPixels.x, centerPixels.y, 0,
-        centerPixels.x, centerPixels.y, animatedRadius
-      );
-      gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
-      gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.8)');
-      gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        // Calculate hexagon center on screen
+        const centerPixels = map.project([center[1], center[0]]);
 
-      fogCtx.beginPath();
-      fogCtx.arc(centerPixels.x, centerPixels.y, animatedRadius, 0, Math.PI * 2);
-      fogCtx.fillStyle = gradient;
-      fogCtx.fill();
+        // Add slight pulsing to hexagons for more dynamic effect
+        const hexPulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + center[0] * 10 + center[1] * 10) * FOG_CONFIG.pulseAmplitude;
+
+        // Create hexagon path
+        fogCtx.beginPath();
+        fogCtx.moveTo(screenPoints[0].x, screenPoints[0].y);
+        for (let i = 1; i < screenPoints.length; i++) {
+          fogCtx.lineTo(screenPoints[i].x, screenPoints[i].y);
+        }
+        fogCtx.closePath();
+
+        // Create radial gradient from center for smooth edges with less visible borders
+        const bounds = fogCtx.getPathBounds ? fogCtx.getPathBounds() : {
+          left: Math.min(...screenPoints.map(p => p.x)),
+          right: Math.max(...screenPoints.map(p => p.x)),
+          top: Math.min(...screenPoints.map(p => p.y)),
+          bottom: Math.max(...screenPoints.map(p => p.y))
+        };
+        // Make gradient larger than hexagon to create smoother overlap
+        const hexagonRadius = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) * hexPulse / 2;
+        const gradientRadius = hexagonRadius * 1.5; // 50% larger gradient for smoother blending
+
+        const gradient = fogCtx.createRadialGradient(
+          centerPixels.x, centerPixels.y, 0,
+          centerPixels.x, centerPixels.y, gradientRadius
+        );
+        // More gradual gradient stops for less visible borders
+        gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+        gradient.addColorStop(0.4, 'rgba(255, 255, 255, 0.9)');
+        gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.5)');
+        gradient.addColorStop(0.9, 'rgba(255, 255, 255, 0.2)');
+        gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+        fogCtx.fillStyle = gradient;
+        fogCtx.fill();
+      } catch (error) {
+        console.warn('[fog] Error drawing hexagon:', hexId, error);
+      }
     });
     fogCtx.globalCompositeOperation = 'source-over';
   }
@@ -157,13 +184,13 @@
   // --- Data Fetching Logic ---
   const loader = document.getElementById('loader');
 
-  async function updateCirclesFromServer() {
+  async function updateHexagonsFromServer() {
     if (isFetching) return;
     isFetching = true;
 
     const loaderTimeout = setTimeout(() => {
       if (loader) loader.style.display = 'flex';
-    }, 300); // Only show loader if request takes > 300ms
+    }, 500); // Only show loader if request takes > 300ms
 
     try {
       const bounds = map.getBounds();
@@ -171,18 +198,17 @@
       const response = await fetch(`/api/v1/circles?bbox=${bbox}`, { headers: { 'X-Telegram-Init': tg ? tg.initData : '' } });
       if (!response.ok) throw new Error(`Network error: ${response.statusText}`);
       const data = await response.json();
-      let newCircles = 0;
-      data.circles.forEach(c => {
-        const id = `${c.lat},${c.lon}`;
-        if (!allKnownCircles.has(id)) {
-          allKnownCircles.set(id, c);
-          newCircles++;
+      let newHexagons = 0;
+      data.hexagons.forEach(hexId => {
+        if (!allKnownHexagons.has(hexId)) {
+          allKnownHexagons.add(hexId);
+          newHexagons++;
         }
       });
       // Fog will be updated automatically by animation loop
-      countEl.textContent = allKnownCircles.size.toLocaleString();
+      countEl.textContent = allKnownHexagons.size.toLocaleString();
     } catch (error) {
-      console.error('[fog] Failed to fetch circles:', error);
+      console.error('[fog] Failed to fetch hexagons:', error);
     } finally {
       isFetching = false;
       clearTimeout(loaderTimeout);
@@ -211,7 +237,7 @@
     });
     resizeObserver.observe(mapContainer);
 
-    updateCirclesFromServer();
+    updateHexagonsFromServer();
 
     try { geolocate.trigger(); } catch (e) { console.error(e); }
 
@@ -220,8 +246,8 @@
   });
 
   // Map events - fog animation handles redrawing automatically
-  map.on('moveend', updateCirclesFromServer);
-  map.on('zoomend', updateCirclesFromServer);
+  map.on('moveend', updateHexagonsFromServer);
+  map.on('zoomend', updateHexagonsFromServer);
   
   function tryLocateCenter() {
     if (!navigator.geolocation) return;
@@ -246,14 +272,23 @@
   });
 
   geolocate.on('error', () => {
-    openBtn.textContent = 'Геолокация не удалась';
+    if (noAuthMode) {
+      openBtn.textContent = 'Кликните на карту для добавления точки';
+      openBtn.disabled = false;
+    } else {
+      openBtn.textContent = 'Геолокация не удалась';
+    }
     // Maybe show a message to the user here
   });
 
   openBtn.addEventListener('click', async () => {
     if (!lastKnownPosition) {
       // This should not happen if the button is disabled
-      alert('Местоположение не определено.');
+      if (noAuthMode) {
+        alert('Используйте клик на карту для добавления точек.');
+      } else {
+        alert('Местоположение не определено.');
+      }
       return;
     }
     openBtn.disabled = true;
@@ -266,9 +301,11 @@
       if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
       const result = await response.json();
       if (result.added > 0) {
-        const c = result.circle;
-        allKnownCircles.set(`${c.lat},${c.lon}`, {lat: c.lat, lon: c.lon, radius_m: c.radius_m});
-        countEl.textContent = allKnownCircles.size.toLocaleString();
+        // Convert the visited location to hexagon ID
+        const h3Resolution = window.currentH3Resolution || 11; // Use current resolution or default
+        const hexId = h3.latLngToCell(lastKnownPosition.latitude, lastKnownPosition.longitude, h3Resolution);
+        allKnownHexagons.add(hexId);
+        countEl.textContent = allKnownHexagons.size.toLocaleString();
         // Fog will be updated automatically by animation loop
       }
     } catch (error) {
@@ -318,45 +355,113 @@
     radiusValue.textContent = radiusSlider.value;
     radiusSlider.addEventListener('input', async () => {
       radiusValue.textContent = radiusSlider.value;
+      const radiusValue = parseInt(radiusSlider.value, 10);
+
+      // Map radius to H3 resolution (same logic as backend)
+      let h3Resolution;
+      if (radiusValue <= 30) {
+        h3Resolution = 13;  // Small hexagons (~100m)
+      } else if (radiusValue <= 70) {
+        h3Resolution = 12;  // Medium-small hexagons (~200m)
+      } else if (radiusValue <= 150) {
+        h3Resolution = 11;  // Medium hexagons (~400m)
+      } else {
+        h3Resolution = 10;  // Large hexagons (~800m)
+      }
+
       try {
         const response = await fetch('/api/v1/radius', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Telegram-Init': tg ? tg.initData : '' },
-          body: JSON.stringify({ radius_m: parseInt(radiusSlider.value, 10) })
+          body: JSON.stringify({ radius_m: radiusValue })
         });
         if (!response.ok) throw new Error('radius update failed');
-        // обновим локально радиусы для визуальной мгновенной обратной связи
-        const newR = parseInt(radiusSlider.value, 10);
-        allKnownCircles.forEach((c, id) => { c.radius_m = newR; allKnownCircles.set(id, c); });
-        // Fog will be updated automatically by animation loop
+
+        const result = await response.json();
+
+        // Store current H3 resolution for use in hexagon operations
+        window.currentH3Resolution = h3Resolution;
+
+        // If resolution changed, backend cleared all data, so we need to clear local cache too
+        if (result.resolution_changed) {
+          allKnownHexagons.clear();
+          console.log('H3 resolution changed, cleared local hexagon cache');
+        }
+
+        // Refresh data from server
+        updateHexagonsFromServer();
       } catch (e) {
         console.warn('[debug] radius update error', e);
       }
     });
   }
 
-  // Удаление ближайшей точки по клику в режиме удаления
+  // Добавление точки по клику в no-auth режиме (если геолокация недоступна)
   map.on('click', async (e) => {
+    // Режим добавления точек в no-auth режиме без геолокации
+    if (noAuthMode && !lastKnownPosition && !deleteMode) {
+      const lngLat = map.unproject(e.point);
+      const lat = lngLat.lat;
+      const lng = lngLat.lng;
+
+      try {
+        const response = await fetch('/api/v1/visit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init': tg ? tg.initData : '' },
+          body: JSON.stringify({ lat: lat, lon: lng })
+        });
+        if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+        const result = await response.json();
+        if (result.added > 0) {
+          // Convert the visited location to hexagon ID
+          const h3Resolution = window.currentH3Resolution || 11; // Use current resolution or default
+          const hexId = h3.latLngToCell(lat, lng, h3Resolution);
+          allKnownHexagons.add(hexId);
+          countEl.textContent = allKnownHexagons.size.toLocaleString();
+          // Fog will be updated automatically by animation loop
+        }
+      } catch (error) {
+        console.error('[visit] Failed to visit area by click:', error);
+      }
+      return; // Не продолжаем с логикой удаления
+    }
+
     if (!deleteMode) return;
-    let bestId = null;
-    let bestDist = Infinity;
-    allKnownCircles.forEach((c, id) => {
-      const p = map.project([c.lon, c.lat]);
-      const d = Math.hypot(p.x - e.point.x, p.y - e.point.y);
-      if (d < bestDist) { bestDist = d; bestId = id; }
+
+    // Convert click coordinates to lat/lng
+    const lngLat = map.unproject(e.point);
+    const lat = lngLat.lat;
+    const lng = lngLat.lng;
+
+    // Find hexagon that contains this point
+    let targetHexId = null;
+    allKnownHexagons.forEach(hexId => {
+      try {
+        // Check if the point is in this hexagon
+        const h3Resolution = window.currentH3Resolution || 11; // Use current resolution or default
+        const pointCell = h3.latLngToCell(lat, lng, h3Resolution);
+        if (pointCell === hexId) {
+          targetHexId = hexId;
+        }
+      } catch (error) {
+        // Ignore invalid hexagons
+      }
     });
-    if (!bestId || bestDist > 30) return; // слишком далеко от клика
-    const c = allKnownCircles.get(bestId);
+
+    if (!targetHexId) return; // No hexagon found at click location
+
+    // Get center coordinates of the hexagon for deletion
+    const center = h3.cellToLatLng(targetHexId);
     try {
-      const response = await fetch(`/api/v1/circle?lat=${c.lat}&lon=${c.lon}`, {
+      const response = await fetch(`/api/v1/circle?lat=${center[0]}&lon=${center[1]}`, {
         method: 'DELETE',
         headers: { 'X-Telegram-Init': tg ? tg.initData : '' }
       });
       if (!response.ok) throw new Error('delete failed');
       const res = await response.json();
       if (res.deleted > 0) {
-        allKnownCircles.delete(bestId);
-        countEl.textContent = allKnownCircles.size.toLocaleString();
+        allKnownHexagons.delete(targetHexId);
+        countEl.textContent = allKnownHexagons.size.toLocaleString();
         // Fog will be updated automatically by animation loop
       }
     } catch (err) {
