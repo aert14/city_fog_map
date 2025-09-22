@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 # Absolute project root
-PROJECT_ROOT := /home/aert141414/city_fog_map
+PROJECT_ROOT := ~/city_fog_map
 VENV := $(PROJECT_ROOT)/.venv
 
 .PHONY: help venv backend backend-debug backend-wo-auth tunnel tunnel-status password kill

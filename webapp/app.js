@@ -9,7 +9,18 @@
   const statusEl = document.getElementById('status');
   const fogCanvas = document.getElementById('fog-canvas');
   const fogCtx = fogCanvas.getContext('2d');
-  const FOG_COLOR = '#1a1a1a';
+  // Fog configuration
+  const FOG_CONFIG = {
+    baseColor: '#2a2a2a',
+    gradientColors: ['rgba(42, 42, 42, 0.9)', 'rgba(32, 32, 32, 0.7)', 'rgba(22, 22, 22, 0.5)', 'rgba(15, 15, 15, 0.3)'],
+    blurAmount: 2,
+    animationSpeed: 0.001,
+    pulseAmplitude: 0.1
+  };
+
+  // Animation state
+  let animationTime = 0;
+  let animationFrameId = null;
 
   // --- Map Initialization ---
   const map = new maplibregl.Map({
@@ -66,8 +77,31 @@
       return;
     }
 
-    fogCtx.fillStyle = FOG_COLOR;
-    fogCtx.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
+    // Create layered fog effect with animation
+    const layers = FOG_CONFIG.gradientColors.length;
+    const layerHeight = fogCanvas.height / layers;
+    const pulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed) * FOG_CONFIG.pulseAmplitude;
+
+    for (let i = 0; i < layers; i++) {
+      const animatedLayerHeight = layerHeight * pulse;
+      const yOffset = i * layerHeight + (layerHeight - animatedLayerHeight) / 2;
+
+      const gradient = fogCtx.createLinearGradient(0, yOffset, 0, yOffset + animatedLayerHeight);
+      gradient.addColorStop(0, FOG_CONFIG.gradientColors[i]);
+      gradient.addColorStop(1, FOG_CONFIG.gradientColors[Math.min(i + 1, layers - 1)]);
+
+      fogCtx.fillStyle = gradient;
+      fogCtx.fillRect(0, yOffset, fogCanvas.width, animatedLayerHeight);
+    }
+
+    // Apply blur for fog effect
+    if (FOG_CONFIG.blurAmount > 0) {
+      fogCtx.filter = `blur(${FOG_CONFIG.blurAmount}px)`;
+      fogCtx.drawImage(fogCanvas, 0, 0);
+      fogCtx.filter = 'none';
+    }
+
+    // Clear areas where fog has been "dispelled" with smooth edges
     fogCtx.globalCompositeOperation = 'destination-out';
     allKnownCircles.forEach(circle => {
       const centerPixels = map.project([circle.lon, circle.lat]);
@@ -76,12 +110,48 @@
       const pixelsPerLonDegree = Math.abs(edgePixels.x - centerPixels.x) / 0.001;
       const metersPerDegree = 111320 * Math.cos(circle.lat * Math.PI / 180);
       const radiusPixels = (circle.radius_m / metersPerDegree) * pixelsPerLonDegree;
+
+      // Add slight pulsing to circles for more dynamic effect
+      const circlePulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + circle.lat * 10 + circle.lon * 10) * 0.05;
+      const animatedRadius = radiusPixels * circlePulse;
+
+      // Create radial gradient for smooth edges
+      const gradient = fogCtx.createRadialGradient(
+        centerPixels.x, centerPixels.y, 0,
+        centerPixels.x, centerPixels.y, animatedRadius
+      );
+      gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+      gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.8)');
+      gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
       fogCtx.beginPath();
-      fogCtx.arc(centerPixels.x, centerPixels.y, radiusPixels, 0, Math.PI * 2);
-      fogCtx.fillStyle = 'white';
+      fogCtx.arc(centerPixels.x, centerPixels.y, animatedRadius, 0, Math.PI * 2);
+      fogCtx.fillStyle = gradient;
       fogCtx.fill();
     });
     fogCtx.globalCompositeOperation = 'source-over';
+  }
+
+  // Animation loop
+  function animateFog() {
+    if (fogEnabled) {
+      animationTime += 1;
+      drawFog();
+      animationFrameId = requestAnimationFrame(animateFog);
+    }
+  }
+
+  function startFogAnimation() {
+    if (fogEnabled && !animationFrameId) {
+      animateFog();
+    }
+  }
+
+  function stopFogAnimation() {
+    if (animationFrameId) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
   }
 
   // --- Data Fetching Logic ---
@@ -103,7 +173,7 @@
           newCircles++;
         }
       });
-      if (newCircles > 0) drawFog();
+      // Fog will be updated automatically by animation loop
       countEl.textContent = allKnownCircles.size.toLocaleString();
     } catch (error) {
       console.error('[fog] Failed to fetch circles:', error);
@@ -130,17 +200,19 @@
     const resizeObserver = new ResizeObserver(() => {
       fogCanvas.width = mapContainer.clientWidth;
       fogCanvas.height = mapContainer.clientHeight;
-      drawFog();
+      // Fog will be redrawn automatically by animation loop
     });
     resizeObserver.observe(mapContainer);
-    
+
     updateCirclesFromServer();
 
     try { geolocate.trigger(); } catch (e) { console.error(e); }
+
+    // Start fog animation if enabled
+    startFogAnimation();
   });
 
-  map.on('move', drawFog);
-  map.on('zoom', drawFog);
+  // Map events - fog animation handles redrawing automatically
   map.on('moveend', updateCirclesFromServer);
   map.on('zoomend', updateCirclesFromServer);
   
@@ -174,7 +246,7 @@
         const c = result.circle;
         allKnownCircles.set(`${c.lat},${c.lon}`, {lat: c.lat, lon: c.lon, radius_m: c.radius_m});
         countEl.textContent = allKnownCircles.size.toLocaleString();
-        drawFog();
+        // Fog will be updated automatically by animation loop
       }
     } catch (error) {
       console.error('[visit] Failed to visit area:', error);
@@ -188,8 +260,9 @@
     fogEnabled = !fogEnabled;
     toggleFogBtn.textContent = fogEnabled ? 'Скрыть туман' : 'Показать туман';
     if (fogEnabled) {
-      drawFog();
+      startFogAnimation();
     } else {
+      stopFogAnimation();
       fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
     }
   });
@@ -237,7 +310,7 @@
         // обновим локально радиусы для визуальной мгновенной обратной связи
         const newR = parseInt(radiusSlider.value, 10);
         allKnownCircles.forEach((c, id) => { c.radius_m = newR; allKnownCircles.set(id, c); });
-        drawFog();
+        // Fog will be updated automatically by animation loop
       } catch (e) {
         console.warn('[debug] radius update error', e);
       }
@@ -266,7 +339,7 @@
       if (res.deleted > 0) {
         allKnownCircles.delete(bestId);
         countEl.textContent = allKnownCircles.size.toLocaleString();
-        drawFog();
+        // Fog will be updated automatically by animation loop
       }
     } catch (err) {
       console.warn('[debug] delete error', err);
