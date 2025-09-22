@@ -96,24 +96,14 @@ class VisitRequest(BaseModel):
     lon: float = Field(..., ge=-180.0, le=180.0)
 
 
-class Circle(BaseModel):
-    lat: float
-    lon: float
-    radius_m: int = 100
-
-
 class VisitResponse(BaseModel):
     added: int
-    circle: Circle
     stats: Dict[str, int]
 
 
-class CirclesResponse(BaseModel):
-    circles: List[Circle]
+class HexagonsResponse(BaseModel):
+    hexagons: List[str]
 
-
-class RadiusRequest(BaseModel):
-    radius_m: int = Field(..., ge=1, le=1000)
 
 async def get_current_user(request: Request, telegram_init: Optional[str] = Header(default=None, alias="X-Telegram-Init")) -> Tuple[int, Optional[str]]:
     logger.info("Authenticating user")
@@ -288,66 +278,36 @@ async def health() -> Dict[str, str]:
 
 @app.post("/api/v1/visit", response_model=VisitResponse)
 async def visit_area(body: VisitRequest, user=Depends(get_current_user)):
-    # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
 
     conn = db_module.get_connection()
 
     lat, lon = float(body.lat), float(body.lon)
-    # Quantization: configurable H3 resolution and circle radius
     H3_RESOLUTION = int(os.getenv("H3_RESOLUTION", "13"))
-    DEFAULT_RADIUS_M = int(os.getenv("DEFAULT_RADIUS_M", "50"))
-    logger.info(f"Visit quantization: H3_RESOLUTION={H3_RESOLUTION}, DEFAULT_RADIUS_M={DEFAULT_RADIUS_M}")
+    logger.info(f"Visit quantization: H3_RESOLUTION={H3_RESOLUTION}")
     geokey = h3.latlng_to_cell(lat, lon, H3_RESOLUTION)
 
-    added = db_module.insert_circle_if_new(conn, user_id=user_id, geokey=geokey, lat=lat, lon=lon, radius_m=DEFAULT_RADIUS_M)
-    total = db_module.count_circles(conn, user_id=user_id)
+    added = db_module.insert_hexagon_if_new(conn, user_id=user_id, geokey=geokey)
+    total = db_module.count_hexagons(conn, user_id=user_id)
 
-    logger.info(f"Visit processed: added={added}, total_circles={total}, geokey={geokey}")
+    logger.info(f"Visit processed: added={added}, total_hexagons={total}, geokey={geokey}")
     return VisitResponse(
         added=1 if added else 0,
-        circle=Circle(lat=lat, lon=lon, radius_m=DEFAULT_RADIUS_M),
-        stats={"total_circles": total},
+        stats={"total_hexagons": total},
     )
 
 
-@app.get("/api/v1/circles", response_model=CirclesResponse)
-async def list_circles(bbox: str, user=Depends(get_current_user)):
-    # DEBUG_AUTH_MODE check is now in get_current_user
+@app.get("/api/v1/hexagons", response_model=HexagonsResponse)
+async def list_hexagons(user=Depends(get_current_user)):
     user_id, _ = user
-    logger.info(f"Circles request: bbox={bbox}, user_id={user_id}")
-
-    try:
-        min_lon_str, min_lat_str, max_lon_str, max_lat_str = bbox.split(",")
-        min_lon, min_lat = float(min_lon_str), float(min_lat_str)
-        max_lon, max_lat = float(max_lon_str), float(max_lat_str)
-    except Exception as e:
-        logger.error(f"Invalid bbox format: {bbox}, error: {e}")
-        raise HTTPException(status_code=400, detail="bad bbox")
+    logger.info(f"Hexagons request: user_id={user_id}")
 
     conn = db_module.get_connection()
-    rows = db_module.select_circles_in_bbox(conn, user_id=user_id, min_lat=min_lat, min_lon=min_lon, max_lat=max_lat, max_lon=max_lon)
-    items = [Circle(lat=r[0], lon=r[1], radius_m=int(r[2])) for r in rows]
+    hexagons = db_module.select_hexagons_by_user(conn, user_id=user_id)
 
-    logger.info(f"Circles response: {len(items)} circles returned")
-    return CirclesResponse(circles=items)
-
-
-@app.delete("/api/v1/circle")
-async def delete_circle(lat: float, lon: float, user=Depends(get_current_user)):
-    user_id, _ = user
-    conn = db_module.get_connection()
-    deleted = db_module.delete_circle_by_latlon(conn, user_id=user_id, lat=lat, lon=lon)
-    return {"deleted": int(deleted)}
-
-
-@app.post("/api/v1/radius")
-async def set_radius(body: RadiusRequest, user=Depends(get_current_user)):
-    user_id, _ = user
-    conn = db_module.get_connection()
-    updated = db_module.update_radius_for_user(conn, user_id=user_id, radius_m=int(body.radius_m))
-    return {"updated": int(updated)}
+    logger.info(f"Hexagons response: {len(hexagons)} hexagons returned")
+    return HexagonsResponse(hexagons=hexagons)
 
 
 # -------------------------
@@ -402,5 +362,3 @@ async def debug_mode():
         "debug_auth_mode": DEBUG_AUTH_MODE,
         "no_auth_mode": NO_AUTH_MODE
     }
-
-

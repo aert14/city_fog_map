@@ -34,17 +34,10 @@
   const statusEl = document.getElementById('status');
   const fogCanvas = document.getElementById('fog-canvas');
   const fogCtx = fogCanvas.getContext('2d');
-  // Fog configuration
   const FOG_CONFIG = {
     baseColor: 'rgba(42, 42, 42, 0.95)',
-    blurAmount: 4, // Increased blur for a softer look
-    animationSpeed: 0.001,
-    pulseAmplitude: 0.05
+    blurAmount: 2,
   };
-
-  // Animation state
-  let animationTime = 0;
-  let animationFrameId = null;
 
   // --- Map Initialization ---
   const map = new maplibregl.Map({
@@ -59,25 +52,22 @@
     positionOptions: { enableHighAccuracy: true },
     trackUserLocation: false,
     showUserHeading: true,
-    showAccuracyCircle: false, // <--- УБЕДИТЕСЬ, ЧТО ЭТА СТРОКА ЕСТЬ И У НЕЁ ЗНАЧЕНИЕ 'false'
-    fitBoundsOptions: {
-      maxZoom: 22 // Установите желаемый максимальный уровень масштабирования
-  }
+    showAccuracyCircle: false,
+    fitBoundsOptions: { maxZoom: 22 }
   });
-  // Отключаем внутренние перемещения камеры у GeolocateControl
   try {
     if (geolocate && geolocate._updateCamera) {
       geolocate._updateCamera = function(){};
     }
   } catch (_) {}
   map.addControl(geolocate);
+
   // --- State ---
-  const allKnownCircles = new Map();
+  const allKnownHexagons = new Set();
   let isFetching = false;
   let fogEnabled = true;
-  let noAuthMode = isNoAuthMode; // Use the value from the initial check
+  let noAuthMode = isNoAuthMode;
 
-  // Show toggle fog button in no-auth mode
   if (noAuthMode) {
     toggleFogBtn.style.display = 'inline-block';
   }
@@ -89,100 +79,83 @@
       return;
     }
 
-    // A single, uniform fog layer
     fogCtx.fillStyle = FOG_CONFIG.baseColor;
     fogCtx.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
 
-    // Apply blur for fog effect
     if (FOG_CONFIG.blurAmount > 0) {
-      // We draw the canvas onto itself to apply the blur
       fogCtx.filter = `blur(${FOG_CONFIG.blurAmount}px)`;
       fogCtx.drawImage(fogCanvas, 0, 0);
       fogCtx.filter = 'none';
     }
 
-    // Clear areas where fog has been "dispelled" with smooth edges
     fogCtx.globalCompositeOperation = 'destination-out';
-    allKnownCircles.forEach(circle => {
-      const centerPixels = map.project([circle.lon, circle.lat]);
-      const edgeLonLat = [circle.lon + 0.001, circle.lat];
-      const edgePixels = map.project(edgeLonLat);
-      const pixelsPerLonDegree = Math.abs(edgePixels.x - centerPixels.x) / 0.001;
-      const metersPerDegree = 111320 * Math.cos(circle.lat * Math.PI / 180);
-      const radiusPixels = (circle.radius_m / metersPerDegree) * pixelsPerLonDegree;
+    fogCtx.fillStyle = 'white'; // Color doesn't matter with destination-out, but good practice
 
-      // Add slight pulsing to circles for more dynamic effect
-      const circlePulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + circle.lat * 10 + circle.lon * 10) * FOG_CONFIG.pulseAmplitude;
-      const animatedRadius = radiusPixels * circlePulse;
+    allKnownHexagons.forEach(h3Index => {
+      try {
+        const boundary = h3.h3ToGeoBoundary(h3Index);
+        const projectedBoundary = boundary.map(p => map.project([p[1], p[0]]));
 
-      // Create radial gradient for smooth edges
-      const gradient = fogCtx.createRadialGradient(
-        centerPixels.x, centerPixels.y, 0,
-        centerPixels.x, centerPixels.y, animatedRadius
-      );
-      gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
-      gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.8)');
-      gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
-      fogCtx.beginPath();
-      fogCtx.arc(centerPixels.x, centerPixels.y, animatedRadius, 0, Math.PI * 2);
-      fogCtx.fillStyle = gradient;
-      fogCtx.fill();
+        fogCtx.beginPath();
+        fogCtx.moveTo(projectedBoundary[0].x, projectedBoundary[0].y);
+        for (let i = 1; i < projectedBoundary.length; i++) {
+          fogCtx.lineTo(projectedBoundary[i].x, projectedBoundary[i].y);
+        }
+        fogCtx.closePath();
+        fogCtx.fill();
+      } catch (e) {
+        console.warn(`[h3] Invalid H3 index: ${h3Index}`, e);
+      }
     });
     fogCtx.globalCompositeOperation = 'source-over';
   }
 
-  // Animation loop
-  function animateFog() {
-    if (fogEnabled) {
-      animationTime += 1;
-      drawFog();
-      animationFrameId = requestAnimationFrame(animateFog);
-    }
+  let needsRedraw = false;
+  function scheduleRedraw() {
+      needsRedraw = true;
   }
 
-  function startFogAnimation() {
-    if (fogEnabled && !animationFrameId) {
-      animateFog();
-    }
+  function animationLoop() {
+      if (needsRedraw) {
+          drawFog();
+          needsRedraw = false;
+      }
+      requestAnimationFrame(animationLoop);
   }
 
-  function stopFogAnimation() {
-    if (animationFrameId) {
-      cancelAnimationFrame(animationFrameId);
-      animationFrameId = null;
-    }
-  }
 
   // --- Data Fetching Logic ---
   const loader = document.getElementById('loader');
 
-  async function updateCirclesFromServer() {
+  async function updateHexagonsFromServer() {
     if (isFetching) return;
     isFetching = true;
 
     const loaderTimeout = setTimeout(() => {
       if (loader) loader.style.display = 'flex';
-    }, 300); // Only show loader if request takes > 300ms
+    }, 300);
 
     try {
-      const bounds = map.getBounds();
-      const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(',');
-      const response = await fetch(`/api/v1/circles?bbox=${bbox}`, { headers: { 'X-Telegram-Init': tg ? tg.initData : '' } });
+      // Bbox is removed, we fetch all hexagons for the user
+      const response = await fetch(`/api/v1/hexagons`, { headers: { 'X-Telegram-Init': tg ? tg.initData : '' } });
       if (!response.ok) throw new Error(`Network error: ${response.statusText}`);
       const data = await response.json();
-      let newCircles = 0;
-      data.circles.forEach(c => {
-        const id = `${c.lat},${c.lon}`;
-        if (!allKnownCircles.has(id)) {
-          allKnownCircles.set(id, c);
-          newCircles++;
+
+      let newHexagons = 0;
+      data.hexagons.forEach(h3Index => {
+        if (!allKnownHexagons.has(h3Index)) {
+          allKnownHexagons.add(h3Index);
+          newHexagons++;
         }
       });
-      // Fog will be updated automatically by animation loop
-      countEl.textContent = allKnownCircles.size.toLocaleString();
+
+      if (newHexagons > 0) {
+        scheduleRedraw();
+      }
+      countEl.textContent = allKnownHexagons.size.toLocaleString();
+
     } catch (error) {
-      console.error('[fog] Failed to fetch circles:', error);
+      console.error('[fog] Failed to fetch hexagons:', error);
     } finally {
       isFetching = false;
       clearTimeout(loaderTimeout);
@@ -193,48 +166,36 @@
   // --- Event Handlers ---
   map.on('load', () => {
     const mapContainer = document.getElementById('map-container');
-
-    // --- РЕШЕНИЕ ПРОБЛЕМЫ ---
-    // 1. Находим контейнер с кнопками, который создал MapLibre.
     const controls = mapContainer.querySelector('.maplibregl-control-container');
     if (controls) {
-      // 2. "Вынимаем" его из карты и вставляем как прямой дочерний элемент #map-container.
-      // Теперь он является "соседом" карты и холста, а не их "потомком".
       mapContainer.appendChild(controls);
     }
-    // -------------------------
 
     const resizeObserver = new ResizeObserver(() => {
       fogCanvas.width = mapContainer.clientWidth;
       fogCanvas.height = mapContainer.clientHeight;
-      // Fog will be redrawn automatically by animation loop
+      scheduleRedraw();
     });
     resizeObserver.observe(mapContainer);
 
-    updateCirclesFromServer();
-
+    updateHexagonsFromServer();
     try { geolocate.trigger(); } catch (e) { console.error(e); }
 
-    // Start fog animation if enabled
-    startFogAnimation();
+    // Start animation loop
+    requestAnimationFrame(animationLoop);
   });
-
-  // Map events - fog animation handles redrawing automatically
-  map.on('moveend', updateCirclesFromServer);
-  map.on('zoomend', updateCirclesFromServer);
   
-  function tryLocateCenter() {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 15 }),
-      (err) => console.warn('[geo] getCurrentPosition error:', err.message)
-    );
-  }
+  // Redraw on map move/zoom
+  map.on('move', scheduleRedraw);
+  map.on('zoom', scheduleRedraw);
+  // Also update from server when move ends
+  map.on('moveend', updateHexagonsFromServer);
+
+
   let lastKnownPosition = null;
-  // При нажатии кнопки геолокации приближать минимум до целевого зума
   const TARGET_GEO_ZOOM = 17;
 
-  openBtn.disabled = true; // Disable by default
+  openBtn.disabled = true;
   openBtn.textContent = 'Определение...';
 
   geolocate.on('geolocate', (pos) => {
@@ -242,17 +203,15 @@
     const zoom = Math.max(map.getZoom(), TARGET_GEO_ZOOM);
     map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom });
     openBtn.disabled = false;
-    openBtn.textContent = 'Открыть 50 м вокруг';
+    openBtn.textContent = 'Открыть вокруг';
   });
 
   geolocate.on('error', () => {
     openBtn.textContent = 'Геолокация не удалась';
-    // Maybe show a message to the user here
   });
 
   openBtn.addEventListener('click', async () => {
     if (!lastKnownPosition) {
-      // This should not happen if the button is disabled
       alert('Местоположение не определено.');
       return;
     }
@@ -265,12 +224,18 @@
       });
       if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
       const result = await response.json();
-      if (result.added > 0) {
-        const c = result.circle;
-        allKnownCircles.set(`${c.lat},${c.lon}`, {lat: c.lat, lon: c.lon, radius_m: c.radius_m});
-        countEl.textContent = allKnownCircles.size.toLocaleString();
-        // Fog will be updated automatically by animation loop
+
+      // Update total count from server response
+      if (result.stats && result.stats.total_hexagons) {
+          countEl.textContent = result.stats.total_hexagons.toLocaleString();
       }
+
+      // If a new hexagon was added, we need to find out which one
+      // For simplicity, we just refetch all hexagons
+      if (result.added > 0) {
+        await updateHexagonsFromServer();
+      }
+
     } catch (error) {
       console.error('[visit] Failed to visit area:', error);
     } finally {
@@ -282,85 +247,15 @@
   toggleFogBtn.addEventListener('click', () => {
     fogEnabled = !fogEnabled;
     toggleFogBtn.textContent = fogEnabled ? 'Скрыть туман' : 'Показать туман';
-    if (fogEnabled) {
-      startFogAnimation();
-    } else {
-      stopFogAnimation();
-      fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
+    if (!fogEnabled) {
+        fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
     }
+    scheduleRedraw();
   });
 
-  // --- Debug UI: radius slider + delete mode ---
-  const radiusSlider = document.getElementById('radiusSlider');
-  const radiusValue = document.getElementById('radiusValue');
-  const deleteModeBtn = document.getElementById('deleteModeBtn');
+  // --- Remove Debug UI ---
   const debugPanel = document.getElementById('debugPanel');
-  let deleteMode = false;
-
-  function setDeleteMode(on) {
-    deleteMode = !!on;
-    if (deleteModeBtn) {
-      deleteModeBtn.textContent = deleteMode ? 'Удаление: вкл' : 'Удаление: выкл';
-      deleteModeBtn.style.background = deleteMode ? '#b91c1c' : '#ef4444';
-    }
+  if (debugPanel) {
+    debugPanel.remove();
   }
-
-  // Show debug panel only in noAuthMode
-  if (isNoAuthMode) {
-    if (debugPanel) debugPanel.style.display = 'flex';
-  }
-
-  if (deleteModeBtn) {
-    deleteModeBtn.addEventListener('click', () => setDeleteMode(!deleteMode));
-  }
-
-  if (radiusSlider && radiusValue) {
-    radiusValue.textContent = radiusSlider.value;
-    radiusSlider.addEventListener('input', async () => {
-      radiusValue.textContent = radiusSlider.value;
-      try {
-        const response = await fetch('/api/v1/radius', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init': tg ? tg.initData : '' },
-          body: JSON.stringify({ radius_m: parseInt(radiusSlider.value, 10) })
-        });
-        if (!response.ok) throw new Error('radius update failed');
-        // обновим локально радиусы для визуальной мгновенной обратной связи
-        const newR = parseInt(radiusSlider.value, 10);
-        allKnownCircles.forEach((c, id) => { c.radius_m = newR; allKnownCircles.set(id, c); });
-        // Fog will be updated automatically by animation loop
-      } catch (e) {
-        console.warn('[debug] radius update error', e);
-      }
-    });
-  }
-
-  // Удаление ближайшей точки по клику в режиме удаления
-  map.on('click', async (e) => {
-    if (!deleteMode) return;
-    let bestId = null;
-    let bestDist = Infinity;
-    allKnownCircles.forEach((c, id) => {
-      const p = map.project([c.lon, c.lat]);
-      const d = Math.hypot(p.x - e.point.x, p.y - e.point.y);
-      if (d < bestDist) { bestDist = d; bestId = id; }
-    });
-    if (!bestId || bestDist > 30) return; // слишком далеко от клика
-    const c = allKnownCircles.get(bestId);
-    try {
-      const response = await fetch(`/api/v1/circle?lat=${c.lat}&lon=${c.lon}`, {
-        method: 'DELETE',
-        headers: { 'X-Telegram-Init': tg ? tg.initData : '' }
-      });
-      if (!response.ok) throw new Error('delete failed');
-      const res = await response.json();
-      if (res.deleted > 0) {
-        allKnownCircles.delete(bestId);
-        countEl.textContent = allKnownCircles.size.toLocaleString();
-        // Fog will be updated automatically by animation loop
-      }
-    } catch (err) {
-      console.warn('[debug] delete error', err);
-    }
-  });
 })();

@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 
 DB_PATH = os.getenv(
@@ -32,14 +32,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Drop the old 'circles' table if it exists to ensure a clean migration
+    conn.execute("DROP TABLE IF EXISTS circles;")
+
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS circles (
+        CREATE TABLE IF NOT EXISTS hexagons (
             user_id INTEGER NOT NULL,
             geokey TEXT NOT NULL,
-            lat REAL NOT NULL,
-            lon REAL NOT NULL,
-            radius_m INTEGER NOT NULL DEFAULT 100,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, geokey),
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -55,98 +55,54 @@ def ensure_user(conn: sqlite3.Connection, tg_id: int, username: Optional[str]) -
     if row:
         user_id = int(row[0])
         # Update username opportunistically
-        conn.execute("UPDATE users SET username = ? WHERE id = ?", (username, user_id))
-        conn.commit()
+        if username:
+            conn.execute("UPDATE users SET username = ? WHERE id = ?", (username, user_id))
+            conn.commit()
         return user_id
     cur = conn.execute(
         "INSERT INTO users (tg_id, username) VALUES (?, ?)", (tg_id, username)
     )
     conn.commit()
-    return int(cur.lastrowid)
+    # Using mypy hint to ensure lastrowid is not None
+    return int(cur.lastrowid) if cur.lastrowid is not None else -1
 
 
-def insert_circle_if_new(
+def insert_hexagon_if_new(
     conn: sqlite3.Connection,
     *,
     user_id: int,
     geokey: str,
-    lat: float,
-    lon: float,
-    radius_m: int,
 ) -> bool:
     cur = conn.execute(
         """
-        INSERT OR IGNORE INTO circles (user_id, geokey, lat, lon, radius_m)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO hexagons (user_id, geokey)
+        VALUES (?, ?)
         """,
-        (user_id, geokey, float(lat), float(lon), int(radius_m)),
+        (user_id, geokey),
     )
     conn.commit()
     return cur.rowcount > 0
 
 
-def count_circles(conn: sqlite3.Connection, *, user_id: int) -> int:
-    cur = conn.execute("SELECT COUNT(*) FROM circles WHERE user_id = ?", (user_id,))
-    return int(cur.fetchone()[0])
+def count_hexagons(conn: sqlite3.Connection, *, user_id: int) -> int:
+    cur = conn.execute("SELECT COUNT(*) FROM hexagons WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
 
 
-def select_circles_in_bbox(
+def select_hexagons_by_user(
     conn: sqlite3.Connection,
     *,
     user_id: int,
-    min_lat: float,
-    min_lon: float,
-    max_lat: float,
-    max_lon: float,
-) -> List[Tuple[float, float, int]]:
+) -> List[str]:
     cur = conn.execute(
         """
-        SELECT lat, lon, radius_m
-        FROM circles
+        SELECT geokey
+        FROM hexagons
         WHERE user_id = ?
-          AND lat BETWEEN ? AND ?
-          AND lon BETWEEN ? AND ?
         ORDER BY created_at DESC
-        LIMIT 10000
+        LIMIT 20000
         """,
-        (user_id, min_lat, max_lat, min_lon, max_lon),
+        (user_id,),
     )
-    return [(float(r[0]), float(r[1]), int(r[2])) for r in cur.fetchall()]
-
-
-
-def delete_circle_by_latlon(
-    conn: sqlite3.Connection,
-    *,
-    user_id: int,
-    lat: float,
-    lon: float,
-) -> int:
-    cur = conn.execute(
-        """
-        DELETE FROM circles
-        WHERE user_id = ? AND ABS(lat - ?) < 1e-7 AND ABS(lon - ?) < 1e-7
-        """,
-        (user_id, float(lat), float(lon)),
-    )
-    conn.commit()
-    return cur.rowcount
-
-
-def update_radius_for_user(
-    conn: sqlite3.Connection,
-    *,
-    user_id: int,
-    radius_m: int,
-) -> int:
-    cur = conn.execute(
-        """
-        UPDATE circles
-        SET radius_m = ?
-        WHERE user_id = ?
-        """,
-        (int(radius_m), int(user_id)),
-    )
-    conn.commit()
-    return cur.rowcount
-
+    return [str(r[0]) for r in cur.fetchall()]
