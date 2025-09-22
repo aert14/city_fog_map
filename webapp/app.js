@@ -1,6 +1,31 @@
-(function(){
+(async function(){
   const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
   if (tg) { try { tg.ready(); } catch (_) {} }
+
+  async function checkNoAuthMode() {
+    try {
+      const response = await fetch('/api/v1/debug-mode');
+      if (!response.ok) return false;
+      const data = await response.json();
+      return !!data.no_auth_mode;
+    } catch (error) {
+      console.warn('[auth] Failed to check debug mode:', error);
+      return false;
+    }
+  }
+
+  const hasInitData = !!(tg && tg.initData);
+  const isNoAuthMode = await checkNoAuthMode();
+
+  if (!hasInitData && !isNoAuthMode) {
+    document.getElementById('app').innerHTML = `
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; font-family: sans-serif; color: #ccc;">
+        <h2 style="margin: 0; color: #eee;">Oops!</h2>
+        <p style="margin: 8px 0 0;">Could not initialize the application.<br>Please make sure you are running this inside Telegram.</p>
+      </div>
+    `;
+    return;
+  }
 
   // --- UI & Config ---
   const openBtn = document.getElementById('openBtn');
@@ -51,24 +76,12 @@
   const allKnownCircles = new Map();
   let isFetching = false;
   let fogEnabled = true;
-  let noAuthMode = false;
+  let noAuthMode = isNoAuthMode; // Use the value from the initial check
 
-  // --- Debug Mode Detection ---
-  async function checkDebugMode() {
-    try {
-      const response = await fetch('/api/v1/debug-mode');
-      const data = await response.json();
-      noAuthMode = data.no_auth_mode;
-      if (noAuthMode) {
-        toggleFogBtn.style.display = 'inline-block';
-      }
-    } catch (error) {
-      console.warn('[debug] Failed to check debug mode:', error);
-    }
+  // Show toggle fog button in no-auth mode
+  if (noAuthMode) {
+    toggleFogBtn.style.display = 'inline-block';
   }
-
-  // Check debug mode on startup
-  checkDebugMode();
 
   // --- Core Drawing Logic ---
   function drawFog() {
@@ -155,10 +168,12 @@
   }
 
   // --- Data Fetching Logic ---
+  const loader = document.getElementById('loader');
+
   async function updateCirclesFromServer() {
     if (isFetching) return;
     isFetching = true;
-    statusEl.textContent = 'Загрузка...';
+    if (loader) loader.style.display = 'flex';
     try {
       const bounds = map.getBounds();
       const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(',');
@@ -179,7 +194,7 @@
       console.error('[fog] Failed to fetch circles:', error);
     } finally {
       isFetching = false;
-      statusEl.textContent = '';
+      if (loader) loader.style.display = 'none';
     }
   }
 
@@ -226,13 +241,29 @@
   let lastKnownPosition = null;
   // При нажатии кнопки геолокации приближать минимум до целевого зума
   const TARGET_GEO_ZOOM = 17;
+
+  openBtn.disabled = true; // Disable by default
+  openBtn.textContent = 'Определение...';
+
   geolocate.on('geolocate', (pos) => {
     lastKnownPosition = pos.coords;
     const zoom = Math.max(map.getZoom(), TARGET_GEO_ZOOM);
     map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom });
+    openBtn.disabled = false;
+    openBtn.textContent = 'Открыть 50 м вокруг';
   });
+
+  geolocate.on('error', () => {
+    openBtn.textContent = 'Геолокация не удалась';
+    // Maybe show a message to the user here
+  });
+
   openBtn.addEventListener('click', async () => {
-    if (!lastKnownPosition) { alert('Местоположение не определено.'); return; }
+    if (!lastKnownPosition) {
+      // This should not happen if the button is disabled
+      alert('Местоположение не определено.');
+      return;
+    }
     openBtn.disabled = true;
     try {
       const response = await fetch('/api/v1/visit', {
@@ -251,7 +282,7 @@
     } catch (error) {
       console.error('[visit] Failed to visit area:', error);
     } finally {
-      openBtn.disabled = false;
+      openBtn.disabled = !lastKnownPosition;
     }
   });
 
@@ -282,15 +313,10 @@
     }
   }
 
-  // Показать панель только в noAuthMode
-  (async () => {
-    try {
-      const resp = await fetch('/api/v1/debug-mode');
-      const data = await resp.json();
-      noAuthMode = !!data.no_auth_mode;
-      if (debugPanel) debugPanel.style.display = noAuthMode ? 'flex' : 'none';
-    } catch (_) {}
-  })();
+  // Show debug panel only in noAuthMode
+  if (isNoAuthMode) {
+    if (debugPanel) debugPanel.style.display = 'flex';
+  }
 
   if (deleteModeBtn) {
     deleteModeBtn.addEventListener('click', () => setDeleteMode(!deleteMode));

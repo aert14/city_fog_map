@@ -37,26 +37,70 @@
         left: 0;
         width: 100%;
         height: 100%;
-        z-index: 1; /* Карта - самый нижний слой */
+        z-index: 1;
       }
 
       #fog-canvas {
         position: absolute;
         top: 0;
         left: 0;
-        z-index: 2; /* Туман - средний слой */
+        z-index: 2;
         pointer-events: none; 
       }
 
-      /* После того как JS переместит этот контейнер, это правило сработает */
       .maplibregl-control-container {
-        z-index: 3; /* Кнопки - самый верхний слой */
+        z-index: 3;
       }
 
-      .btn { background: #4f46e5; color: white; border: 0; padding: 8px 12px; border-radius: 6px; font-size: 14px; cursor: pointer; }
-      .btn:disabled { opacity: .6; cursor: default; }
-      #status { font-size: 13px; color: #555; }
+      .btn {
+        background: #4f46e5;
+        color: white;
+        border: 0;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 14px;
+        cursor: pointer;
+        transition: background-color 0.2s, opacity 0.2s;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+      }
+      .btn:hover:not(:disabled) { background: #4338ca; }
+      .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+      #status {
+        font-size: 13px;
+        color: #555;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
       #count { font-weight: bold; }
+
+      #loader {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 20;
+        display: none; /* Hidden by default */
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-family: sans-serif;
+      }
+      .spinner {
+        border: 4px solid rgba(255, 255, 255, 0.3);
+        border-radius: 50%;
+        border-top: 4px solid #fff;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+      }
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
     </style>
   </head>
   <body>
@@ -76,6 +120,7 @@
       <div id="map-container">
         <div id="map"></div>
         <canvas id="fog-canvas"></canvas>
+        <div id="loader"><div class="spinner"></div></div>
       </div>
     </div>
 
