@@ -215,3 +215,20 @@ def clear_user_circles(conn: sqlite3.Connection, user_id: int) -> int:
     conn.commit()
     return cur.rowcount
 
+
+def clear_all(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Delete all rows from circles and users tables.
+
+    Returns:
+        (deleted_circles, deleted_users)
+    """
+    cur_c = conn.execute("SELECT COUNT(*) FROM circles")
+    cur_u = conn.execute("SELECT COUNT(*) FROM users")
+    count_circles = int(cur_c.fetchone()[0])
+    count_users = int(cur_u.fetchone()[0])
+
+    conn.execute("DELETE FROM circles")
+    conn.execute("DELETE FROM users")
+    conn.commit()
+    return count_circles, count_users
+

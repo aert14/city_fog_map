@@ -34,16 +34,17 @@
   const statusEl = document.getElementById('status');
   const fogCanvas = document.getElementById('fog-canvas');
   const fogCtx = fogCanvas.getContext('2d');
+  const DPR = window.devicePixelRatio || 1;
   // Fog configuration
   const FOG_CONFIG = {
     // Base fog layer
-    baseAlpha: 0.6, // Base alpha for the initial fog fill
-    baseColor: 'rgb(42, 42, 42)', // Base color, alpha is now separate
+    baseAlpha: 1.0, // Fully opaque base to completely cover the map
+    baseColor: 'rgb(12, 12, 12)', // Very dark base color
 
     // Noise properties
-    noiseScale: 0.05, // Smaller value = larger noise features
-    noiseIntensity: 0.3, // How visible the noise is (0 to 1)
-    driftSpeed: 0.00005, // How fast the noise pattern moves
+    noiseScale: 0.015, // Larger, softer features
+    noiseIntensity: 0.25, // Strength of shading when multiplying
+    driftSpeed: 0.00002, // Slow drift
 
     // Hexagon reveal properties
     blurAmount: 4,
@@ -84,6 +85,15 @@
     }
   } catch (_) {}
   map.addControl(geolocate);
+
+  // Keep fog canvas synchronized with MapLibre's CSS transform during zoom/pan animations
+  fogCanvas.style.transformOrigin = '0 0';
+  map.on('render', () => {
+    const mapCanvas = map.getCanvas();
+    if (mapCanvas && mapCanvas.style && fogCanvas.style) {
+      fogCanvas.style.transform = mapCanvas.style.transform || '';
+    }
+  });
   // --- State ---
   const allKnownHexagons = new Set();
   let isFetching = false;
@@ -91,7 +101,7 @@
   let noAuthMode = isNoAuthMode; // Use the value from the initial check
 
   // Initialize H3 resolution (will be updated by radius slider)
-  window.currentH3Resolution = 11; // Default resolution
+  window.currentH3Resolution = 9; // Larger default hexagons
 
   // Show toggle fog button in no-auth mode
   if (noAuthMode) {
@@ -102,40 +112,88 @@
 
   /**
    * Creates a canvas with a seamless, tileable noise pattern.
+   * Uses OffscreenCanvas if available with a DOM Canvas fallback.
+   * The scale parameter controls feature size: smaller values -> larger blobs.
    * @param {number} width
    * @param {number} height
-   * @param {number} scale - Determines the "zoom" level of the noise.
-   * @returns {OffscreenCanvas}
+   * @param {number} scale
+   * @returns {Canvas}
    */
   function createNoisePattern(width, height, scale) {
-    const noiseCanvas = new OffscreenCanvas(width, height);
-    const noiseCtx = noiseCanvas.getContext('2d');
-    const imageData = noiseCtx.createImageData(width, height);
+    const useOffscreen = typeof OffscreenCanvas === 'function';
+    const canvas = useOffscreen ? new OffscreenCanvas(width, height) : document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+
+    const imageData = ctx.createImageData(width, height);
     const data = imageData.data;
 
-    // A simple pseudo-random number generator for deterministic noise
-    let seed = 1;
-    function random() {
-      const x = Math.sin(seed++) * 10000;
-      return x - Math.floor(x);
+    // Base frequency controls feature size
+    const baseFreq = Math.max(0.002, Math.min(0.1, scale || 0.02));
+
+    // Periodic value noise with bilinear interpolation + fBm (multi-octave)
+    function hash2(ix, iy) {
+      const s = Math.sin(ix * 127.1 + iy * 311.7) * 43758.5453123;
+      return s - Math.floor(s);
     }
+    function smoothstep(t) { return t * t * (3 - 2 * t); }
+
+    // To ensure seamless tiling, wrap grid indices with a fixed period
+    const GRID_PERIOD = 64; // grid cells per tile on base octave
+
+    function valueNoise(u, v, freq) {
+      const uu = u * freq;
+      const vv = v * freq;
+      const i0 = Math.floor(uu);
+      const j0 = Math.floor(vv);
+      const fx = smoothstep(uu - i0);
+      const fy = smoothstep(vv - j0);
+      const ix0 = ((i0 % GRID_PERIOD) + GRID_PERIOD) % GRID_PERIOD;
+      const iy0 = ((j0 % GRID_PERIOD) + GRID_PERIOD) % GRID_PERIOD;
+      const ix1 = (ix0 + 1) % GRID_PERIOD;
+      const iy1 = (iy0 + 1) % GRID_PERIOD;
+      const v00 = hash2(ix0, iy0);
+      const v10 = hash2(ix1, iy0);
+      const v01 = hash2(ix0, iy1);
+      const v11 = hash2(ix1, iy1);
+      const vx0 = v00 * (1 - fx) + v10 * fx;
+      const vx1 = v01 * (1 - fx) + v11 * fx;
+      return vx0 * (1 - fy) + vx1 * fy;
+    }
+
+    const octaves = 4;
+    const persistence = 0.5; // amplitude per octave
+    const lacunarity = 2.0;  // frequency multiplier per octave
 
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        // Using a simple random function for noise
-        const value = Math.floor(random() * 255);
+        const u = x / width;
+        const v = y / height;
+        let amp = 1.0;
+        let freq = baseFreq * GRID_PERIOD; // scale to grid period
+        let sum = 0.0;
+        let norm = 0.0;
+        for (let o = 0; o < octaves; o++) {
+          sum += valueNoise(u * GRID_PERIOD, v * GRID_PERIOD, freq) * amp;
+          norm += amp;
+          amp *= persistence;
+          freq *= lacunarity;
+        }
+        const value = Math.floor((sum / norm) * 255);
         const index = (y * width + x) * 4;
         data[index] = value;
         data[index + 1] = value;
         data[index + 2] = value;
-        data[index + 3] = 255; // Alpha
+        data[index + 3] = 255;
       }
     }
-    noiseCtx.putImageData(imageData, 0, 0);
-    return noiseCanvas;
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
   }
 
-  const noisePattern = createNoisePattern(100, 100, FOG_CONFIG.noiseScale);
+  const NOISE_TILE_SIZE = 256;
+  const noisePattern = createNoisePattern(NOISE_TILE_SIZE, NOISE_TILE_SIZE, FOG_CONFIG.noiseScale);
 
 
   function drawFog() {
@@ -144,8 +202,9 @@
       return;
     }
 
-    const width = fogCanvas.width;
-    const height = fogCanvas.height;
+    // Work in CSS pixel space to match MapLibre and our DPR transform
+    const width = fogCanvas.clientWidth || fogCanvas.width / DPR;
+    const height = fogCanvas.clientHeight || fogCanvas.height / DPR;
 
     // 1. Base fog layer
     fogCtx.globalCompositeOperation = 'source-over';
@@ -154,9 +213,9 @@
     fogCtx.fillRect(0, 0, width, height);
     fogCtx.globalAlpha = 1.0; // Reset alpha
 
-    // 2. Subtract noise from the base fog
-    fogCtx.globalCompositeOperation = 'destination-out';
+    // 2. Shade fog with noise (no transparency) for visuals only
     const pattern = fogCtx.createPattern(noisePattern, 'repeat');
+    fogCtx.globalCompositeOperation = 'multiply';
     fogCtx.fillStyle = pattern;
 
     // Animate the drift
@@ -165,11 +224,14 @@
     fogCtx.save();
     fogCtx.translate(dx, dy);
     fogCtx.globalAlpha = FOG_CONFIG.noiseIntensity;
+    const prevFilter = fogCtx.filter;
+    fogCtx.filter = 'blur(0.6px)';
     fogCtx.fillRect(-dx, -dy, width, height);
+    fogCtx.filter = prevFilter || 'none';
     fogCtx.restore();
 
     // 3. Clear areas where fog has been "dispelled" with hexagon shapes
-    // This operation is still 'destination-out'
+    fogCtx.globalCompositeOperation = 'destination-out';
     allKnownHexagons.forEach(hexId => {
       try {
         const boundary = h3.cellToBoundary(hexId);
@@ -192,30 +254,31 @@
         }
         fogCtx.closePath();
 
-        // Create radial gradient from center for smooth edges with less visible borders
+        // Two-phase reveal: 1) clear hole 2) draw subtle rim in multiply
+        // 1) Clear hole fully
+        fogCtx.fillStyle = 'rgba(255,255,255,1)';
+        fogCtx.fill();
+
+        // 2) Subtle rim for visible boundaries
         const bounds = fogCtx.getPathBounds ? fogCtx.getPathBounds() : {
           left: Math.min(...screenPoints.map(p => p.x)),
           right: Math.max(...screenPoints.map(p => p.x)),
           top: Math.min(...screenPoints.map(p => p.y)),
           bottom: Math.max(...screenPoints.map(p => p.y))
         };
-        // Make gradient larger than hexagon to create smoother overlap
         const hexagonRadius = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) * hexPulse / 2;
-        const gradientRadius = hexagonRadius * 1.5; // 50% larger gradient for smoother blending
-
+        const rimRadius = hexagonRadius * 1.08;
         const gradient = fogCtx.createRadialGradient(
-          centerPixels.x, centerPixels.y, 0,
-          centerPixels.x, centerPixels.y, gradientRadius
+          centerPixels.x, centerPixels.y, hexagonRadius * 0.9,
+          centerPixels.x, centerPixels.y, rimRadius
         );
-        // More gradual gradient stops for less visible borders
-        gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
-        gradient.addColorStop(0.4, 'rgba(255, 255, 255, 0.9)');
-        gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.5)');
-        gradient.addColorStop(0.9, 'rgba(255, 255, 255, 0.2)');
-        gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
+        gradient.addColorStop(0.0, 'rgba(0,0,0,0)');
+        gradient.addColorStop(1.0, 'rgba(0,0,0,0.7)');
+        fogCtx.save();
+        fogCtx.globalCompositeOperation = 'multiply';
         fogCtx.fillStyle = gradient;
         fogCtx.fill();
+        fogCtx.restore();
       } catch (error) {
         console.warn('[fog] Error drawing hexagon:', hexId, error);
       }
@@ -307,8 +370,16 @@
     // -------------------------
 
     const resizeObserver = new ResizeObserver(() => {
-      fogCanvas.width = mapContainer.clientWidth;
-      fogCanvas.height = mapContainer.clientHeight;
+      const cssW = mapContainer.clientWidth;
+      const cssH = mapContainer.clientHeight;
+      // Style size in CSS pixels
+      fogCanvas.style.width = cssW + 'px';
+      fogCanvas.style.height = cssH + 'px';
+      // Backing store size in device pixels
+      fogCanvas.width = Math.max(1, Math.floor(cssW * DPR));
+      fogCanvas.height = Math.max(1, Math.floor(cssH * DPR));
+      // Scale context so that drawing uses CSS pixel coordinates
+      fogCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
       // Fog will be redrawn automatically by animation loop
     });
     resizeObserver.observe(mapContainer);
@@ -407,6 +478,7 @@
   const radiusSlider = document.getElementById('radiusSlider');
   const radiusValue = document.getElementById('radiusValue');
   const deleteModeBtn = document.getElementById('deleteModeBtn');
+  const clearDbBtn = document.getElementById('clearDbBtn');
   const debugPanel = document.getElementById('debugPanel');
   let deleteMode = false;
 
@@ -468,6 +540,26 @@
         updateHexagonsFromServer();
       } catch (e) {
         console.warn('[debug] radius update error', e);
+      }
+    });
+  }
+
+  // Debug: clear DB button (available only in dev/no-auth modes from backend)
+  if (clearDbBtn) {
+    clearDbBtn.addEventListener('click', async () => {
+      if (!confirm('Очистить всю БД? Это действие необратимо.')) return;
+      try {
+        const res = await fetch('/api/v1/dev/clear-db', { method: 'POST' });
+        if (!res.ok) throw new Error('clear-db failed');
+        const data = await res.json().catch(() => ({}));
+        allKnownHexagons.clear();
+        countEl.textContent = '0';
+        // немедленно перерисуем туман
+        drawFog();
+        alert(`БД очищена. circles=${data.cleared_circles ?? '?'}, users=${data.cleared_users ?? '?'}`);
+      } catch (e) {
+        alert('Ошибка очистки БД');
+        console.warn('[dev] clear-db error', e);
       }
     });
   }
