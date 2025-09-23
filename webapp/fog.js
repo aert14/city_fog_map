@@ -115,9 +115,22 @@ function createCloudTexture(width, height) {
     return canvas;
   }
 
+// Caches to reduce repeated H3 geometry computations
+const __boundaryCache = new Map(); // hexId -> [[lat,lng],...]
+const __centerCache = new Map();   // hexId -> [lat,lng]
+let __lastRenderMs = 0;            // throttle draw to ~30 FPS
+
 function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_CONFIG, DPR, cloudPattern) {
     const width = fogCtx.canvas.clientWidth || fogCtx.canvas.width / DPR;
     const height = fogCtx.canvas.clientHeight || fogCtx.canvas.height / DPR;
+
+    // Throttle to ~30 FPS only when map is idle to keep sync during movement
+    const now = performance.now();
+    const isMoving = (typeof map.isMoving === 'function' && map.isMoving()) ||
+                     (typeof map.isZooming === 'function' && map.isZooming()) ||
+                     (typeof map.isRotating === 'function' && map.isRotating());
+    if (!isMoving && now - __lastRenderMs < 33) return;
+    __lastRenderMs = now;
 
     fogCtx.clearRect(0, 0, width, height);
     if (!fogEnabled) return;
@@ -137,9 +150,8 @@ function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_C
 
     if (allKnownHexagons.size === 0) return;
 
-    // --- OPTIMIZATION: Filter hexagons to only those visible on screen ---
+    // Filter hexagons to only those visible on screen (+padding)
     const bounds = map.getBounds();
-    // Add a small padding so hexagons at the edge don't disappear abruptly
     const sw = bounds.getSouthWest();
     const ne = bounds.getNorthEast();
     const paddingLat = (ne.lat - sw.lat) * 0.1;
@@ -148,57 +160,128 @@ function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_C
     const visibleHexagons = [];
     allKnownHexagons.forEach(hexId => {
       try {
-        const center = h3.cellToLatLng(hexId); // [lat, lng]
+        let center = __centerCache.get(hexId);
+        if (!center) { center = h3.cellToLatLng(hexId); __centerCache.set(hexId, center); }
         if (center[0] > sw.lat - paddingLat && center[0] < ne.lat + paddingLat &&
             center[1] > sw.lng - paddingLng && center[1] < ne.lng + paddingLng) {
           visibleHexagons.push(hexId);
         }
       } catch (e) {}
     });
-    // --- END OPTIMIZATION ---
 
-    // Step A: Shadow under the clouds
-    fogCtx.globalCompositeOperation = 'destination-out';
-    fogCtx.filter = `blur(${FOG_CONFIG.shadowBlur}px)`;
-    // Use the filtered visibleHexagons array instead of allKnownHexagons
-    visibleHexagons.forEach(hexId => {
-      try {
-        const boundary = h3.cellToBoundary(hexId);
-        const screenPoints = boundary.map(([lat, lng]) => map.project([lng, lat]));
-        fogCtx.beginPath();
-        fogCtx.moveTo(screenPoints[0].x, screenPoints[0].y);
-        for (let i = 1; i < screenPoints.length; i++) fogCtx.lineTo(screenPoints[i].x, screenPoints[i].y);
-        fogCtx.closePath();
-        fogCtx.fillStyle = 'rgba(0, 0, 0, 0.85)';
-        fogCtx.fill();
-      } catch (e) {}
-    });
+    if (visibleHexagons.length === 0) return;
 
-    // Step B: Hole in the clouds
-    fogCtx.filter = `blur(${FOG_CONFIG.revealBlur}px)`;
-    // Use the filtered visibleHexagons array here as well
-    visibleHexagons.forEach(hexId => {
+    const heavyLoad = visibleHexagons.length > 180;
+    const extremeLoad = visibleHexagons.length > 320;
+    const pulseEnabled = !heavyLoad && visibleHexagons.length <= 120;
+    const blurScale = heavyLoad ? (extremeLoad ? 0 : 0.55) : 1;
+    const shadowBlurPx = blurScale > 0 ? Math.max(8, FOG_CONFIG.shadowBlur * blurScale) : 0;
+    const revealBlurPx = blurScale > 0 ? Math.max(6, FOG_CONFIG.revealBlur * blurScale) : 0;
+
+    const frameGeometries = new Map();
+
+    if (heavyLoad) {
+      // Simplified rendering: draw soft circles instead of full hex paths
+      fogCtx.globalCompositeOperation = 'destination-out';
+      fogCtx.filter = shadowBlurPx > 0 ? `blur(${shadowBlurPx}px)` : 'none';
+      fogCtx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+
+      for (let i = 0; i < visibleHexagons.length; i++) {
+        const hexId = visibleHexagons[i];
         try {
-            const boundary = h3.cellToBoundary(hexId);
-            const screenPoints = boundary.map(([lat, lng]) => map.project([lng, lat]));
-            const center = h3.cellToLatLng(hexId);
-            const pulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + center[0] + center[1]) * FOG_CONFIG.pulseAmplitude;
+          let boundary = __boundaryCache.get(hexId);
+          if (!boundary) { boundary = h3.cellToBoundary(hexId); __boundaryCache.set(hexId, boundary); }
+          let center = __centerCache.get(hexId);
+          if (!center) { center = h3.cellToLatLng(hexId); __centerCache.set(hexId, center); }
+
+          const centerPixels = map.project([center[1], center[0]]);
+          const sample = boundary[0] || center;
+          const samplePixels = map.project([sample[1], sample[0]]);
+          const radius = Math.max(4, Math.hypot(samplePixels.x - centerPixels.x, samplePixels.y - centerPixels.y) * 1.1);
+
+          frameGeometries.set(hexId, { center, centerPixels, radius });
+
+          fogCtx.beginPath();
+          fogCtx.arc(centerPixels.x, centerPixels.y, radius, 0, Math.PI * 2);
+          fogCtx.fill();
+        } catch (e) {}
+      }
+
+      fogCtx.filter = revealBlurPx > 0 ? `blur(${revealBlurPx}px)` : 'none';
+      fogCtx.fillStyle = 'white';
+      for (let i = 0; i < visibleHexagons.length; i++) {
+        const hexId = visibleHexagons[i];
+        const geom = frameGeometries.get(hexId);
+        if (!geom) continue;
+        fogCtx.beginPath();
+        fogCtx.arc(geom.centerPixels.x, geom.centerPixels.y, geom.radius * 0.92, 0, Math.PI * 2);
+        fogCtx.fill();
+      }
+    } else {
+      // Detailed rendering with cached paths
+      fogCtx.globalCompositeOperation = 'destination-out';
+      fogCtx.filter = `blur(${shadowBlurPx}px)`;
+
+      const shadowPath = new Path2D();
+      for (let i = 0; i < visibleHexagons.length; i++) {
+        const hexId = visibleHexagons[i];
+        try {
+          let boundary = __boundaryCache.get(hexId);
+          if (!boundary) { boundary = h3.cellToBoundary(hexId); __boundaryCache.set(hexId, boundary); }
+          let center = __centerCache.get(hexId);
+          if (!center) { center = h3.cellToLatLng(hexId); __centerCache.set(hexId, center); }
+
+          const path = new Path2D();
+          const first = boundary[0];
+          const firstProjected = map.project([first[1], first[0]]);
+          path.moveTo(firstProjected.x, firstProjected.y);
+          for (let j = 1; j < boundary.length; j++) {
+            const ll = boundary[j];
+            const projected = map.project([ll[1], ll[0]]);
+            path.lineTo(projected.x, projected.y);
+          }
+          path.closePath();
+          shadowPath.addPath(path);
+
+          const centerPixels = map.project([center[1], center[0]]);
+          frameGeometries.set(hexId, { path, center, centerPixels });
+        } catch (e) {}
+      }
+      fogCtx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+      fogCtx.fill(shadowPath);
+
+      fogCtx.filter = `blur(${revealBlurPx}px)`;
+      if (pulseEnabled) {
+        for (let i = 0; i < visibleHexagons.length; i++) {
+          const hexId = visibleHexagons[i];
+          const geom = frameGeometries.get(hexId);
+          if (!geom) continue;
+          try {
+            const pulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + geom.center[0] + geom.center[1]) * FOG_CONFIG.pulseAmplitude;
 
             fogCtx.save();
-            const centerPixels = map.project([center[1], center[0]]);
-            fogCtx.translate(centerPixels.x, centerPixels.y);
+            const cp = geom.centerPixels;
+            fogCtx.translate(cp.x, cp.y);
             fogCtx.scale(pulse, pulse);
-            fogCtx.translate(-centerPixels.x, -centerPixels.y);
+            fogCtx.translate(-cp.x, -cp.y);
 
-            fogCtx.beginPath();
-            fogCtx.moveTo(screenPoints[0].x, screenPoints[0].y);
-            for (let i = 1; i < screenPoints.length; i++) fogCtx.lineTo(screenPoints[i].x, screenPoints[i].y);
-            fogCtx.closePath();
             fogCtx.fillStyle = 'white';
-            fogCtx.fill();
+            fogCtx.fill(geom.path);
             fogCtx.restore();
-        } catch (e) {}
-    });
+          } catch (e) {}
+        }
+      } else {
+        const revealPath = new Path2D();
+        for (let i = 0; i < visibleHexagons.length; i++) {
+          const hexId = visibleHexagons[i];
+          const geom = frameGeometries.get(hexId);
+          if (!geom) continue;
+          revealPath.addPath(geom.path);
+        }
+        fogCtx.fillStyle = 'white';
+        fogCtx.fill(revealPath);
+      }
+    }
 
     fogCtx.filter = 'none';
     fogCtx.globalCompositeOperation = 'source-over';

@@ -70,6 +70,8 @@
   let fogEnabled = true;
   let animationTime = 0;
   window.currentH3Resolution = 9;
+  // Prevent accidental clicks after dragging/zooming the map (phantom circles)
+  let ignoreNextClick = false;
 
   if (noAuthMode || debugAuthMode) {
     toggleFogBtn.style.display = 'inline-block';
@@ -138,6 +140,9 @@
   });
 
   map.on('moveend', updateHexagonsFromServer);
+  // Mark that a move has occurred so the next click is ignored
+  map.on('movestart', () => { ignoreNextClick = true; });
+  map.on('moveend', () => { setTimeout(() => { ignoreNextClick = false; }, 120); });
   
   let lastKnownPosition = null;
   const TARGET_GEO_ZOOM = 17;
@@ -264,6 +269,7 @@
   }
 
   map.on('click', async (e) => {
+    if (ignoreNextClick) return;
     if (noAuthMode && !lastKnownPosition && !deleteMode) {
       const lngLat = map.unproject(e.point);
       try {
