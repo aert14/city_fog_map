@@ -439,3 +439,14 @@ async def debug_mode():
     }
 
 
+# Dev utility: clear entire database (allowed only in debug/no-auth)
+@app.post("/api/v1/dev/clear-db")
+async def dev_clear_db():
+    if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        raise HTTPException(status_code=403, detail="forbidden")
+    conn = db_module.get_connection()
+    cleared_circles, cleared_users = db_module.clear_all(conn)
+    logger.warning(f"DEV clear-db executed: circles={cleared_circles}, users={cleared_users}")
+    return {"cleared_circles": int(cleared_circles), "cleared_users": int(cleared_users)}
+
+
