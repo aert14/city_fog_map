@@ -343,11 +343,15 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
     return CirclesResponse(hexagons=hexagons)
 
 
+class DeleteCircleRequest(BaseModel):
+    geokey: str = Field(..., min_length=10, max_length=20)
+
+
 @app.delete("/api/v1/circle")
-async def delete_circle(lat: float, lon: float, user=Depends(get_current_user)):
+async def delete_circle(body: DeleteCircleRequest, user=Depends(get_current_user)):
     user_id, _ = user
     conn = db_module.get_connection()
-    deleted = db_module.delete_circle_by_latlon(conn, user_id=user_id, lat=lat, lon=lon)
+    deleted = db_module.delete_circle_by_geokey(conn, user_id=user_id, geokey=body.geokey)
     return {"deleted": int(deleted)}
 
 
