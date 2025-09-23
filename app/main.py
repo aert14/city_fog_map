@@ -18,6 +18,7 @@ import h3
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as db_module
+from . import utils
 
 
 # Configure logging
@@ -27,9 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# File logging to project root: /home/aert141414/city_fog_map/server.log
+# File logging to project root
 try:
-    project_root = os.path.dirname(os.path.dirname(__file__))
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     log_file_path = os.path.join(project_root, "server.log")
     need_handler = True
     for h in logging.getLogger().handlers:
@@ -115,41 +116,26 @@ class CirclesResponse(BaseModel):
 class RadiusRequest(BaseModel):
     radius_m: int = Field(..., ge=1, le=1000)
 
-async def get_current_user(request: Request, telegram_init: Optional[str] = Header(default=None, alias="X-Telegram-Init")) -> Tuple[int, Optional[str]]:
-    logger.info("Authenticating user")
-
-    # 0) No-auth local mode (for development only)
-    if NO_AUTH_MODE:
-        conn = db_module.get_connection()
-        user_id = db_module.ensure_user(conn, tg_id=999_999_999, username="local")
-        logger.warning("NO_AUTH_MODE enabled: bypassing auth, using local user")
-        return user_id, "local"
-
-    # 1) Try session-based auth (set by /api/auth)
+def _get_user_from_session(request: Request) -> Optional[Tuple[int, Optional[str]]]:
     if request.session.get("tg_authenticated") and request.session.get("tg_user_id"):
         try:
-            tg_id = int(request.session.get("tg_user_id"))
-        except Exception:
-            tg_id = None
-        tg_user = request.session.get("tg_user") or {}
-        username = tg_user.get("username") if isinstance(tg_user, dict) else None
-        if tg_id:
+            tg_id = int(request.session["tg_user_id"])
+            tg_user = request.session.get("tg_user", {})
+            username = tg_user.get("username") if isinstance(tg_user, dict) else None
+
             conn = db_module.get_connection()
             user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
             logger.info(f"User authenticated via session: user_id={user_id}, tg_id={tg_id}, username={username}")
             return user_id, username
+        except (ValueError, TypeError):
+            logger.warning("Invalid user data in session", exc_info=True)
+            return None
+    return None
 
-    # 2) Fallback to header-based auth (Telegram WebApp initData per request)
-    if DEBUG_AUTH_MODE:
-        # In debug mode, normal endpoints are disabled; keep behavior consistent
-        raise HTTPException(status_code=503, detail="authentication disabled in debug auth mode")
-
+def _get_user_from_header(telegram_init: str) -> Tuple[int, Optional[str]]:
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set")
         raise HTTPException(status_code=500, detail="Server misconfigured: TELEGRAM_BOT_TOKEN not set")
-    if not telegram_init:
-        logger.warning("No X-Telegram-Init header provided")
-        raise HTTPException(status_code=401, detail="missing initData")
 
     result = verify_init_data(telegram_init, TELEGRAM_BOT_TOKEN)
     if not result.get("ok"):
@@ -159,18 +145,41 @@ async def get_current_user(request: Request, telegram_init: Optional[str] = Head
     user_raw = payload.get("user")
     if not user_raw:
         raise HTTPException(status_code=401, detail="no user in initData")
+
     try:
         user_obj = json.loads(user_raw)
-    except json.JSONDecodeError:
+        tg_id = int(user_obj["id"])
+        username = user_obj.get("username")
+    except (json.JSONDecodeError, KeyError, ValueError):
         raise HTTPException(status_code=401, detail="bad user json")
-
-    tg_id = int(user_obj.get("id"))
-    username = user_obj.get("username")
 
     conn = db_module.get_connection()
     user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
     logger.info(f"User authenticated via header: user_id={user_id}, tg_id={tg_id}, username={username}")
     return user_id, username
+
+
+async def get_current_user(request: Request, telegram_init: Optional[str] = Header(default=None, alias="X-Telegram-Init")) -> Tuple[int, Optional[str]]:
+    logger.info("Authenticating user")
+
+    if NO_AUTH_MODE:
+        conn = db_module.get_connection()
+        user_id = db_module.ensure_user(conn, tg_id=999_999_999, username="local")
+        logger.warning("NO_AUTH_MODE enabled: bypassing auth, using local user")
+        return user_id, "local"
+
+    session_user = _get_user_from_session(request)
+    if session_user:
+        return session_user
+
+    if DEBUG_AUTH_MODE:
+        raise HTTPException(status_code=503, detail="Authentication via session only in debug auth mode")
+
+    if not telegram_init:
+        logger.warning("No X-Telegram-Init header provided")
+        raise HTTPException(status_code=401, detail="missing initData")
+
+    return _get_user_from_header(telegram_init)
 
 
 app = FastAPI(title="City Fog Map API", version="0.1.0")
@@ -211,8 +220,10 @@ def _read_index_with_version() -> str:
     try:
         with open(index_path, "r", encoding="utf-8") as f:
             html = f.read()
-        # inject version to app.js
+        # inject version to app.js, style.css, and fog.js
         html = html.replace("/webapp/app.js", f"/webapp/app.js?v={APP_VERSION}")
+        html = html.replace("/webapp/style.css", f"/webapp/style.css?v={APP_VERSION}")
+        html = html.replace("/webapp/fog.js", f"/webapp/fog.js?v={APP_VERSION}")
         return html
     except Exception as e:
         logger.error(f"Failed to read index.html: {e}")
@@ -296,16 +307,8 @@ async def visit_area(body: VisitRequest, user=Depends(get_current_user)):
 
     lat, lon = float(body.lat), float(body.lon)
 
-    # Get user's H3 resolution (based on their radius setting)
     user_resolution = db_module.get_user_h3_resolution(conn, user_id)
-    if user_resolution is None:
-        # Fallback to default if no user setting
-        user_resolution = int(os.getenv("H3_RESOLUTION", "11"))
-
-    # Get user's radius setting
     user_radius = db_module.get_user_radius(conn, user_id)
-    if user_radius is None:
-        user_radius = int(os.getenv("DEFAULT_RADIUS_M", "50"))
 
     logger.info(f"Visit quantization: H3_RESOLUTION={user_resolution}, radius_m={user_radius}")
     geokey = h3.latlng_to_cell(lat, lon, user_resolution)
@@ -361,32 +364,23 @@ async def set_radius(body: RadiusRequest, user=Depends(get_current_user)):
     conn = db_module.get_connection()
     radius_m = int(body.radius_m)
 
-    # Map radius to H3 resolution for hexagon size control
-    # Higher radius = lower resolution = larger hexagons
-    if radius_m <= 30:
-        h3_resolution = 13  # Small hexagons (~100m)
-    elif radius_m <= 70:
-        h3_resolution = 12  # Medium-small hexagons (~200m)
-    elif radius_m <= 150:
-        h3_resolution = 11  # Medium hexagons (~400m)
-    else:
-        h3_resolution = 10  # Large hexagons (~800m)
+    h3_resolution = utils.radius_to_h3_resolution(radius_m)
 
-    # Check if resolution changed
     old_resolution = db_module.get_user_h3_resolution(conn, user_id)
     resolution_changed = old_resolution != h3_resolution
 
-    # Store both radius and computed H3 resolution
     updated = db_module.update_radius_and_resolution_for_user(
         conn, user_id=user_id, radius_m=radius_m, h3_resolution=h3_resolution
     )
 
-    # If resolution changed, clear all user's hexagon data to avoid conflicts
     if resolution_changed:
-        db_module.clear_user_circles(conn, user_id)
-        logger.info(f"Cleared all circles for user {user_id} due to H3 resolution change from {old_resolution} to {h3_resolution}")
+        cleared_count = db_module.clear_user_circles(conn, user_id)
+        logger.info(
+            f"Cleared {cleared_count} circles for user {user_id} due to H3 resolution change "
+            f"from {old_resolution} to {h3_resolution}"
+        )
 
-    return {"updated": int(updated), "h3_resolution": h3_resolution, "resolution_changed": resolution_changed}
+    return {"updated": updated, "h3_resolution": h3_resolution, "resolution_changed": resolution_changed}
 
 
 # -------------------------

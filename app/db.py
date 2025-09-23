@@ -2,6 +2,8 @@ import os
 import sqlite3
 from typing import Optional, List, Tuple
 
+from . import utils
+
 
 DB_PATH = os.getenv(
     "DB_PATH",
@@ -39,9 +41,19 @@ def init_db(conn: sqlite3.Connection) -> None:
             geokey TEXT NOT NULL,
             lat REAL NOT NULL,
             lon REAL NOT NULL,
-            radius_m INTEGER NOT NULL DEFAULT 100,
+            radius_m INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, geokey),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            radius_m INTEGER NOT NULL DEFAULT 50,
+            h3_resolution INTEGER NOT NULL DEFAULT 11,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
         """
@@ -55,14 +67,22 @@ def ensure_user(conn: sqlite3.Connection, tg_id: int, username: Optional[str]) -
     if row:
         user_id = int(row[0])
         # Update username opportunistically
-        conn.execute("UPDATE users SET username = ? WHERE id = ?", (username, user_id))
-        conn.commit()
+        if username:
+            conn.execute("UPDATE users SET username = ? WHERE id = ?", (username, user_id))
+            conn.commit()
         return user_id
+
+    # Create new user
     cur = conn.execute(
         "INSERT INTO users (tg_id, username) VALUES (?, ?)", (tg_id, username)
     )
+    user_id = int(cur.lastrowid)
+
+    # Create default settings for the new user
+    conn.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
     conn.commit()
-    return int(cur.lastrowid)
+
+    return user_id
 
 
 def insert_circle_if_new(
@@ -130,24 +150,6 @@ def delete_circle_by_geokey(
     return cur.rowcount
 
 
-def update_radius_for_user(
-    conn: sqlite3.Connection,
-    *,
-    user_id: int,
-    radius_m: int,
-) -> int:
-    cur = conn.execute(
-        """
-        UPDATE circles
-        SET radius_m = ?
-        WHERE user_id = ?
-        """,
-        (int(radius_m), int(user_id)),
-    )
-    conn.commit()
-    return cur.rowcount
-
-
 def update_radius_and_resolution_for_user(
     conn: sqlite3.Connection,
     *,
@@ -155,55 +157,43 @@ def update_radius_and_resolution_for_user(
     radius_m: int,
     h3_resolution: int,
 ) -> int:
-    # First, ensure user has a record in a user_settings table or similar
-    # For now, we'll store this in a simple key-value approach by updating all user's circles
+    """Update a user's radius and H3 resolution in the user_settings table."""
     cur = conn.execute(
         """
-        UPDATE circles
-        SET radius_m = ?
-        WHERE user_id = ?
+        INSERT INTO user_settings (user_id, radius_m, h3_resolution)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            radius_m = excluded.radius_m,
+            h3_resolution = excluded.h3_resolution;
         """,
-        (int(radius_m), int(user_id)),
+        (user_id, radius_m, h3_resolution),
     )
-
-    # Note: H3 resolution is computed on-the-fly in the application logic
-    # We don't store it in the database, just compute it from radius when needed
-
     conn.commit()
     return cur.rowcount
 
 
-def get_user_radius(conn: sqlite3.Connection, user_id: int) -> Optional[int]:
-    """Get the current radius setting for a user"""
+def get_user_radius(conn: sqlite3.Connection, user_id: int) -> int:
+    """Get the current radius setting for a user from user_settings."""
     cur = conn.execute(
-        """
-        SELECT radius_m
-        FROM circles
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (user_id,),
+        "SELECT radius_m FROM user_settings WHERE user_id = ?", (user_id,)
     )
     row = cur.fetchone()
-    return int(row[0]) if row else None
+    if row:
+        return int(row[0])
+    # Fallback to default if no settings exist for some reason
+    return 50
 
 
-def get_user_h3_resolution(conn: sqlite3.Connection, user_id: int) -> Optional[int]:
-    """Get the H3 resolution for a user based on their radius setting"""
-    radius = get_user_radius(conn, user_id)
-    if radius is None:
-        return None
-
-    # Map radius to H3 resolution (same logic as in main.py)
-    if radius <= 30:
-        return 13  # Small hexagons (~100m)
-    elif radius <= 70:
-        return 12  # Medium-small hexagons (~200m)
-    elif radius <= 150:
-        return 11  # Medium hexagons (~400m)
-    else:
-        return 10  # Large hexagons (~800m)
+def get_user_h3_resolution(conn: sqlite3.Connection, user_id: int) -> int:
+    """Get the H3 resolution for a user from user_settings."""
+    cur = conn.execute(
+        "SELECT h3_resolution FROM user_settings WHERE user_id = ?", (user_id,)
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row[0])
+    # Fallback to default
+    return 11
 
 
 def clear_user_circles(conn: sqlite3.Connection, user_id: int) -> int:

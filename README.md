@@ -1,116 +1,109 @@
-City Fog Map — FastAPI + Telegram WebApp (XS)
+# City Fog Map
 
-Быстрый старт
+City Fog Map is a Telegram Mini App that allows users to "unfog" a map by exploring their surroundings. It's built with FastAPI on the backend and a vanilla JavaScript frontend using MapLibre GL.
 
-1) Установи зависимости
+## Features
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
+*   **Telegram Mini App Integration:** Authenticates users securely via their Telegram client.
+*   **Interactive Map:** Uses MapLibre GL to display an interactive map.
+*   **"Fog of War" Effect:** Unexplored areas are covered in a "fog of war" that users can clear by visiting locations.
+*   **Geospatial Indexing:** Uses H3 for efficient storage and retrieval of explored areas.
+*   **Debug Mode:** Includes a debug mode for easy development and testing.
 
-2) Экспортируй токен бота
+## Architecture
 
-```bash
-export TELEGRAM_BOT_TOKEN=123456:ABC...
-```
+The application consists of two main components:
 
-3) Запусти бэкенд
+1.  **Backend:** A Python-based backend powered by the FastAPI framework. It handles user authentication, API requests, and database interactions.
+2.  **Frontend:** A vanilla JavaScript single-page application that runs as a Telegram Mini App. It uses MapLibre GL for rendering the map and interacts with the backend via a REST API.
 
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info
-```
+The database is a simple SQLite database, making the application self-contained and easy to set up.
 
-Или через Makefile (прозрачный вывод):
-```bash
-export TELEGRAM_BOT_TOKEN=<ваш_бот_токен>
-make -C /home/aert141414/city_fog_map backend
-```
+## Getting Started
 
-4) Туннель в интернет (пример с ngrok)
+### Prerequisites
 
-```bash
-ngrok http 8000
-```
+*   Python 3.8+
+*   A Telegram Bot Token (get one from [@BotFather](https://t.me/BotFather))
+*   A way to expose your local server to the internet (e.g., ngrok, localtunnel)
 
-Скопируй выданный HTTPS `https://<random>.ngrok-free.app`.
+### Installation
 
-5) Настрой мини‑апп в Telegram
+1.  **Clone the repository:**
 
-- В @BotFather: `/setdomain` → `https://<random>.ngrok-free.app`
-- В кнопке `web_app` укажи URL `https://<random>.ngrok-free.app/webapp/`
+    ```bash
+    git clone https://github.com/your-username/city-fog-map.git
+    cd city-fog-map
+    ```
 
-Аутентификация
+2.  **Create a virtual environment and install dependencies:**
 
-- Заголовок `X-Telegram-Init` (основной путь): клиент отправляет сырой `window.Telegram.WebApp.initData` в КАЖДОМ запросе к API. Сервер проверяет подпись (HMAC SHA256 c ключом `HMAC("WebAppData", BOT_TOKEN)`), валидирует `auth_date` и извлекает пользователя.
-- Сессия (fallback): открой `/webapp/debug-auth.html` внутри Telegram Mini App — страница делает `POST /api/auth` с `initData`, сервер ставит cookie‑сессию. Обычные эндпоинты сначала пытаются аутентифицировать по сессии, и только если её нет — ждут заголовок.
-- Требование фронтенда: подключите скрипт Telegram WebApp на странице — `https://telegram.org/js/telegram-web-app.js`.
-- Если нет ни сессии, ни заголовка — будет `401`.
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+    ```
 
-Мини‑API
+### Running the Application
 
-- POST `/api/v1/visit` — вход `{ lat, lon }` → выход `{ added, circle, stats }`
-- GET `/api/v1/circles?bbox=minLon,minLat,maxLon,maxLat` → `{ circles: [...] }`
+1.  **Set the Telegram Bot Token:**
 
-Хранилище
+    ```bash
+    export TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+    ```
 
-- SQLite `db.sqlite3` рядом с проектом
-- Таблицы: `users` и `circles` (PRIMARY KEY по `(user_id, geokey)`)
+2.  **Run the backend server:**
 
-Фронтенд
+    ```bash
+    uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
 
-- Открывается по `/webapp/`
-- MapLibre GL + геолокация, кнопка «Открыть 100 м вокруг меня»
-- Отрисовка кругов 10 м как GeoJSON-полигонов (по умолчанию; настраивается `DEFAULT_RADIUS_M`)
-- На странице должен быть подключён `https://telegram.org/js/telegram-web-app.js`.
+3.  **Expose your local server to the internet:**
 
-Отладка
+    For example, using ngrok:
 
-- 401 → страница открыта не из Telegram или не дошёл заголовок `X-Telegram-Init`
-- hash mismatch → проверь сборку `data_check_string`
-- stale auth_date → протухло время
-- Логи: в корне проекта пишется `/home/aert141414/city_fog_map/server.log`. Для каждого запроса логируются метод, путь, клиентский IP и флаги `tg_init_present`, `tg_init_len`.
+    ```bash
+    ngrok http 8000
+    ```
 
-LocalTunnel (loca.lt) вместо ngrok (Linux)
+    Ngrok will give you a public HTTPS URL (e.g., `https://<random>.ngrok-free.app`).
 
-1) Установите Node.js и npx (любой способ)
-```bash
-sudo apt-get update && sudo apt-get install -y nodejs npm
-# или через nvm: https://github.com/nvm-sh/nvm
-```
+4.  **Configure your Telegram Bot:**
 
-2) Запустите backend на :8000
-```bash
-source /home/aert141414/city_fog_map/.venv/bin/activate
-export TELEGRAM_BOT_TOKEN=<ВАШ_БОТ_ТОКЕН>
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+    *   Talk to [@BotFather](https://t.me/BotFather) on Telegram.
+    *   Use the `/setdomain` command to link your bot to the ngrok URL.
+    *   Create a menu button for your bot with the URL pointing to your web app (e.g., `https://<random>.ngrok-free.app/webapp/`).
 
-3) Поднимите туннель
-```bash
-npx --yes localtunnel --port 8000
-# или фоново с логами:
-nohup npx --yes localtunnel --port 8000 > /tmp/cfm_lt.log 2>&1 & disown
-grep -Eo "https://[a-z0-9-]+\.loca\.lt" /tmp/cfm_lt.log | head -n 1
-```
+## API Endpoints
 
-4) Узнайте пароль туннеля (если запросит)
-```bash
-curl -s https://loca.lt/mytunnelpassword
-```
+The backend exposes the following API endpoints:
 
-5) Настройте бота
-- `/setdomain` → `https://<subdomain>.loca.lt`
-- URL кнопки web_app → `https://<subdomain>.loca.lt/webapp/`
+*   `POST /api/v1/visit`: Records a user's visit to a specific location.
+    *   **Body:** `{ "lat": float, "lon": float }`
+    *   **Response:** `{ "added": int, "circle": object, "stats": object }`
+*   `GET /api/v1/circles`: Retrieves the explored areas (as H3 hexagons) for the current user within a given bounding box.
+    *   **Query Parameter:** `bbox=minLon,minLat,maxLon,maxLat`
+    *   **Response:** `{ "hexagons": [str] }`
+*   `POST /api/v1/radius`: Sets the exploration radius for the current user.
+    *   **Body:** `{ "radius_m": int }`
+    *   **Response:** `{ "updated": int, "h3_resolution": int, "resolution_changed": bool }`
+*   `DELETE /api/v1/circle`: Deletes a specific explored hexagon.
+    *   **Body:** `{ "geokey": str }`
+    *   **Response:** `{ "deleted": int }`
 
-Makefile (автоматизация)
-```bash
-cd /home/aert141414/city_fog_map
-make venv
-export TELEGRAM_BOT_TOKEN=<ВАШ_БОТ_ТОКЕН>
-make start      # backend + localtunnel
-make url        # показать текущий URL
-make password   # пароль туннеля
-make logs       # логи
-make stop       # остановить
-```
+## Development
+
+### Debug Mode
+
+To make development easier, you can run the application in one of two debug modes:
+
+*   **`NO_AUTH_MODE`:** Bypasses Telegram authentication and uses a fixed local user. This is useful for testing the frontend in a regular web browser. To enable it, set the `NO_AUTH_MODE` environment variable:
+    ```bash
+    export NO_AUTH_MODE=1
+    ```
+*   **`DEBUG_AUTH_MODE`:** Enables the debug authentication flow, which uses a session cookie instead of the `X-Telegram-Init` header. This is useful for debugging the authentication process itself. To enable it, set the `DEBUG_AUTH_MODE` environment variable:
+    ```bash
+    export DEBUG_AUTH_MODE=1
+    ```
+
+When either of these modes is enabled, a debug panel will be visible in the frontend, allowing you to change the exploration radius, delete hexagons, and clear the database.
