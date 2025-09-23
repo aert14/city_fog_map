@@ -115,19 +115,16 @@ def select_circles_in_bbox(
 
 
 
-def delete_circle_by_latlon(
+def delete_circle_by_geokey(
     conn: sqlite3.Connection,
     *,
     user_id: int,
-    lat: float,
-    lon: float,
+    geokey: str,
 ) -> int:
+    """Deletes a circle by its geokey for a specific user."""
     cur = conn.execute(
-        """
-        DELETE FROM circles
-        WHERE user_id = ? AND ABS(lat - ?) < 1e-7 AND ABS(lon - ?) < 1e-7
-        """,
-        (user_id, float(lat), float(lon)),
+        "DELETE FROM circles WHERE user_id = ? AND geokey = ?",
+        (user_id, geokey),
     )
     conn.commit()
     return cur.rowcount

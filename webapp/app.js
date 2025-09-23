@@ -497,30 +497,35 @@
     if (!deleteMode) return;
 
     const lngLat = map.unproject(e.point);
-    let targetHexId = null;
-    allKnownHexagons.forEach(hexId => {
-      try {
-        const h3Resolution = window.currentH3Resolution || 11;
-        const pointCell = h3.latLngToCell(lngLat.lat, lngLat.lng, h3Resolution);
-        if (pointCell === hexId) {
-          targetHexId = hexId;
-        }
-      } catch (error) {}
-    });
+    const h3Resolution = window.currentH3Resolution || 11;
+    const targetHexId = h3.latLngToCell(lngLat.lat, lngLat.lng, h3Resolution);
 
-    if (!targetHexId) return;
-    const center = h3.cellToLatLng(targetHexId);
+    if (!allKnownHexagons.has(targetHexId)) {
+      console.log("Clicked on a cell that is not a known hexagon:", targetHexId);
+      return;
+    }
+
     try {
-      const response = await fetch(`/api/v1/circle?lat=${center[0]}&lon=${center[1]}`, {
+      const response = await fetch('/api/v1/circle', {
         method: 'DELETE',
-        headers: { 'X-Telegram-Init': tg ? tg.initData : '' }
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init': tg ? tg.initData : ''
+        },
+        body: JSON.stringify({ geokey: targetHexId })
       });
-      if (!response.ok) throw new Error('delete failed');
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Delete failed with status ${response.status}: ${errText}`);
+      }
       const res = await response.json();
       if (res.deleted > 0) {
         allKnownHexagons.delete(targetHexId);
         countEl.textContent = allKnownHexagons.size.toLocaleString();
         map.triggerRepaint();
+        console.log("Deleted hexagon:", targetHexId);
+      } else {
+        console.warn("Delete command sent, but server reported 0 deleted.", {geokey: targetHexId});
       }
     } catch (err) {
       console.warn('[debug] delete error', err);
