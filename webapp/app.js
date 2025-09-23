@@ -31,36 +31,18 @@
   const openBtn = document.getElementById('openBtn');
   const toggleFogBtn = document.getElementById('toggleFogBtn');
   const countEl = document.getElementById('count');
-  const statusEl = document.getElementById('status');
   const fogCanvas = document.getElementById('fog-canvas');
   const fogCtx = fogCanvas.getContext('2d');
   const DPR = window.devicePixelRatio || 1;
-  // Fog configuration
+
   const FOG_CONFIG = {
-    // Base fog layer
-    baseAlpha: 1.0, // Fully opaque base to completely cover the map
-    baseColor: 'rgb(12, 12, 12)', // Very dark base color
-
-    // Noise properties
-    noiseScale: 0.015, // Larger, softer features
-    noiseIntensity: 0.25, // Strength of shading when multiplying
-    driftSpeed: 0.00002, // Slow drift
-
-    // Hexagon reveal properties
-    blurAmount: 4,
-    animationSpeed: 0.001,
-    pulseAmplitude: 0.05
+    shadowBlur: 55,
+    revealBlur: 40,
+    pulseAmplitude: 0.04,
+    animationSpeed: 0.0015,
   };
 
-  // Animation state
-  let animationTime = 0;
-  let animationFrameId = null;
-  // --- FPS Throttling ---
-  let then = 0;
-  const FPS = 25; // Target FPS
-  const FPS_INTERVAL = 1000 / FPS;
-
-  // --- Map Initialization ---
+  // --- Инициализация карты ---
   const map = new maplibregl.Map({
     container: 'map',
     style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
@@ -73,264 +55,242 @@
     positionOptions: { enableHighAccuracy: true },
     trackUserLocation: false,
     showUserHeading: true,
-    showAccuracyCircle: false, // <--- УБЕДИТЕСЬ, ЧТО ЭТА СТРОКА ЕСТЬ И У НЕЁ ЗНАЧЕНИЕ 'false'
-    fitBoundsOptions: {
-      maxZoom: 22 // Установите желаемый максимальный уровень масштабирования
-  }
+    showAccuracyCircle: false,
+    fitBoundsOptions: { maxZoom: 22 }
   });
-  // Отключаем внутренние перемещения камеры у GeolocateControl
-  try {
-    if (geolocate && geolocate._updateCamera) {
-      geolocate._updateCamera = function(){};
-    }
-  } catch (_) {}
+  try { if (geolocate && geolocate._updateCamera) { geolocate._updateCamera = function(){}; } } catch (_) {}
   map.addControl(geolocate);
 
-  // Keep fog canvas synchronized with MapLibre's CSS transform during zoom/pan animations
-  fogCanvas.style.transformOrigin = '0 0';
-  map.on('render', () => {
-    const mapCanvas = map.getCanvas();
-    if (mapCanvas && mapCanvas.style && fogCanvas.style) {
-      fogCanvas.style.transform = mapCanvas.style.transform || '';
-    }
-  });
-  // --- State ---
+  // --- Состояние приложения ---
   const allKnownHexagons = new Set();
   let isFetching = false;
   let fogEnabled = true;
-  let noAuthMode = isNoAuthMode; // Use the value from the initial check
+  let noAuthMode = isNoAuthMode;
+  let animationTime = 0;
+  window.currentH3Resolution = 9;
 
-  // Initialize H3 resolution (will be updated by radius slider)
-  window.currentH3Resolution = 9; // Larger default hexagons
-
-  // Show toggle fog button in no-auth mode
   if (noAuthMode) {
     toggleFogBtn.style.display = 'inline-block';
   }
 
-  // --- Core Drawing Logic ---
+  // --- ФИНАЛЬНАЯ ЛОГИКА ГЕНЕРАЦИИ ОБЛАКОВ ---
 
-  /**
-   * Creates a canvas with a seamless, tileable noise pattern.
-   * Uses OffscreenCanvas if available with a DOM Canvas fallback.
-   * The scale parameter controls feature size: smaller values -> larger blobs.
-   * @param {number} width
-   * @param {number} height
-   * @param {number} scale
-   * @returns {Canvas}
-   */
-  function createNoisePattern(width, height, scale) {
+  function createCloudTexture(width, height) {
     const useOffscreen = typeof OffscreenCanvas === 'function';
     const canvas = useOffscreen ? new OffscreenCanvas(width, height) : document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
-
     const imageData = ctx.createImageData(width, height);
     const data = imageData.data;
 
-    // Base frequency controls feature size
-    const baseFreq = Math.max(0.002, Math.min(0.1, scale || 0.02));
+      // Генератор шума
+      let seed = Math.random(); function random() { const x = Math.sin(seed++) * 10000; return x - Math.floor(x); }
+      const p = new Uint8Array(512);
+      for (let i = 0; i < 256; i++) p[i] = i;
+      for (let i = 255; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+      for (let i = 0; i < 256; i++) p[i + 256] = p[i];
+      function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+      function lerp(t, a, b) { return a + t * (b - a); }
+      function grad(hash, x, y) { const h = hash & 7; const u = h < 4 ? x : y; const v = h < 4 ? y : x; return ((h & 1) ? -u : u) + ((h & 2) ? -2 * v : 2 * v); }
+      function noise(x, y) {
+          const X = Math.floor(x) & 255, Y = Math.floor(y) & 255; x -= Math.floor(x); y -= Math.floor(y);
+          const u = fade(x), v = fade(y);
+          const A = p[X] + Y, B = p[X + 1] + Y;
+          return lerp(v, lerp(u, grad(p[A], x, y), grad(p[B], x - 1, y)), lerp(u, grad(p[A + 1], x, y - 1), grad(p[B + 1], x - 1, y - 1)));
+      }
+      function fBm(x, y, octaves) {
+          let total = 0, frequency = 1, amplitude = 1, maxValue = 0;
+          for (let i = 0; i < octaves; i++) {
+              total += noise(x * frequency, y * frequency) * amplitude;
+              maxValue += amplitude; amplitude *= 0.5; frequency *= 2.0;
+          }
+          return (total / maxValue + 1) / 2;
+      }
+      function smoothstep(edge0, edge1, x) {
+          const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+          return t * t * (3 - 2 * t);
+      }
 
-    // Periodic value noise with bilinear interpolation + fBm (multi-octave)
-    function hash2(ix, iy) {
-      const s = Math.sin(ix * 127.1 + iy * 311.7) * 43758.5453123;
-      return s - Math.floor(s);
-    }
-    function smoothstep(t) { return t * t * (3 - 2 * t); }
+      const sample = (x, y, scale, oct) => {
+        const nx = x/width, ny = y/height;
+        return lerp(smoothstep(0,1,ny), lerp(smoothstep(0,1,nx), fBm(x*scale,y*scale,oct), fBm((x-width)*scale,y*scale,oct)), lerp(smoothstep(0,1,nx), fBm(x*scale,(y-height)*scale,oct), fBm((x-width)*scale,(y-height)*scale,oct)));
+      };
 
-    // To ensure seamless tiling, wrap grid indices with a fixed period
-    const GRID_PERIOD = 64; // grid cells per tile on base octave
+      for (let j = 0; j < height; j++) {
+          for (let i = 0; i < width; i++) {
+              
+               const base_scale = 0.008;    // Крупный масштаб для масс и просветов
+               const detail_scale = 0.075;  // Больше деталей для объёма
+               const height_scale = 0.02;   // Масштаб для высоты и глубины
 
-    function valueNoise(u, v, freq) {
-      const uu = u * freq;
-      const vv = v * freq;
-      const i0 = Math.floor(uu);
-      const j0 = Math.floor(vv);
-      const fx = smoothstep(uu - i0);
-      const fy = smoothstep(vv - j0);
-      const ix0 = ((i0 % GRID_PERIOD) + GRID_PERIOD) % GRID_PERIOD;
-      const iy0 = ((j0 % GRID_PERIOD) + GRID_PERIOD) % GRID_PERIOD;
-      const ix1 = (ix0 + 1) % GRID_PERIOD;
-      const iy1 = (iy0 + 1) % GRID_PERIOD;
-      const v00 = hash2(ix0, iy0);
-      const v10 = hash2(ix1, iy0);
-      const v01 = hash2(ix0, iy1);
-      const v11 = hash2(ix1, iy1);
-      const vx0 = v00 * (1 - fx) + v10 * fx;
-      const vx1 = v01 * (1 - fx) + v11 * fx;
-      return vx0 * (1 - fy) + vx1 * fy;
-    }
+               const v_base = sample(i, j, base_scale, 6);  // Больше октав для плотности
+               const v_detail = sample(i, j, detail_scale, 10); // Ещё больше октав для деталей
+               const v_height = sample(i, j, height_scale, 8); // Больше октав для глубины
 
-    const octaves = 4;
-    const persistence = 0.5; // amplitude per octave
-    const lacunarity = 2.0;  // frequency multiplier per octave
+               const idx = (j * width + i) * 4;
 
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const u = x / width;
-        const v = y / height;
-        let amp = 1.0;
-        let freq = baseFreq * GRID_PERIOD; // scale to grid period
-        let sum = 0.0;
-        let norm = 0.0;
-        for (let o = 0; o < octaves; o++) {
-          sum += valueNoise(u * GRID_PERIOD, v * GRID_PERIOD, freq) * amp;
-          norm += amp;
-          amp *= persistence;
-          freq *= lacunarity;
-        }
-        const value = Math.floor((sum / norm) * 255);
-        const index = (y * width + x) * 4;
-        data[index] = value;
-        data[index + 1] = value;
-        data[index + 2] = value;
-        data[index + 3] = 255;
+               // --- Финальная формула ---
+               const base_alpha = 0.88; // Почти сплошные облака как в Civ5
+
+               // Более плотные облака - меньше просветов и больше глубины
+               let density = smoothstep(0.12, 0.88, v_base);
+               density = Math.pow(density, 0.75); // поджимаем к единице для общей плотности
+               const height_factor = smoothstep(0.08, 0.92, v_height); // Высота влияет на плотность
+               const final_density = Math.min(1.0, density + height_factor * 0.45); // Больше влияния высоты для глубины
+               const final_alpha = base_alpha + (1 - base_alpha) * final_density;
+
+               // Создаём ощущение глубины через несколько цветовых градиентов (очень белые, объёмные)
+               const shadow_color = [220, 225, 230];   // Чуть темнее тени для глубины
+               const mid_color = [250, 251, 252];      // Почти чисто белые средние тона
+               const peak_color = [255, 255, 255];     // Чисто белые вершины
+
+               // Увеличиваем объёмность - больше влияния деталей и высоты
+               const volume_factor = v_detail * 0.55 + height_factor * 0.45;
+               let color_intensity = smoothstep(0.05, 0.95, volume_factor);
+               // Повышаем локальный контраст, чтобы убрать блеклость
+               color_intensity = Math.min(1, Math.max(0, 0.5 + (color_intensity - 0.5) * 1.35));
+
+               // Минимальный атмосферный эффект для сохранения белизны
+               const atmosphere_factor = smoothstep(0.4, 0.8, height_factor);
+               const atmosphere_darkening = 1 - atmosphere_factor * 0.03;
+
+               // Интерполяция между цветами для создания глубины
+               let r, g, b;
+               if (color_intensity < 0.5) {
+                   // От теней к средним тонам
+                   const t = color_intensity * 2;
+                   r = lerp(t, shadow_color[0], mid_color[0]);
+                   g = lerp(t, shadow_color[1], mid_color[1]);
+                   b = lerp(t, shadow_color[2], mid_color[2]);
+               } else {
+                   // От средних тонов к вершинам
+                   const t = (color_intensity - 0.5) * 2;
+                   r = lerp(t, mid_color[0], peak_color[0]);
+                   g = lerp(t, mid_color[1], peak_color[1]);
+                   b = lerp(t, mid_color[2], peak_color[2]);
+               }
+
+               // Простое освещение на основе высоты и деталей: усиливаем свет и тени
+               const lightFactor = smoothstep(0.3, 0.8, v_height * 0.6 + v_detail * 0.4);
+               const highlight = lightFactor * 0.18;
+               const shadow = (1 - lightFactor) * 0.18;
+               r = r * (1 - shadow) + 255 * highlight;
+               g = g * (1 - shadow) + 255 * highlight;
+               b = b * (1 - shadow) + 255 * highlight;
+
+               // Применяем атмосферный эффект
+               r *= atmosphere_darkening;
+               g *= atmosphere_darkening;
+               b *= atmosphere_darkening;
+
+              data[idx] = r; data[idx+1] = g; data[idx+2] = b;
+              data[idx+3] = Math.floor(final_alpha * 255);
       }
     }
     ctx.putImageData(imageData, 0, 0);
     return canvas;
   }
 
-  const NOISE_TILE_SIZE = 256;
-  const noisePattern = createNoisePattern(NOISE_TILE_SIZE, NOISE_TILE_SIZE, FOG_CONFIG.noiseScale);
-
+  const cloudTexture = createCloudTexture(512, 512);
+  const cloudPattern = fogCtx.createPattern(cloudTexture, 'repeat');
+  const patternMatrix = new DOMMatrix();
 
   function drawFog() {
-    if (!fogEnabled) {
-      fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
-      return;
-    }
-
-    // Work in CSS pixel space to match MapLibre and our DPR transform
+    animationTime++;
     const width = fogCanvas.clientWidth || fogCanvas.width / DPR;
     const height = fogCanvas.clientHeight || fogCanvas.height / DPR;
 
-    // 1. Base fog layer
+    fogCtx.clearRect(0, 0, width, height);
+    if (!fogEnabled) return;
+    
     fogCtx.globalCompositeOperation = 'source-over';
-    fogCtx.fillStyle = FOG_CONFIG.baseColor;
-    fogCtx.globalAlpha = FOG_CONFIG.baseAlpha;
+    const zoom = map.getZoom();
+    const scale = Math.pow(2, zoom - 12);
+    const mapOffset = map.project([0, 0]);
+    
+    patternMatrix.a = scale; patternMatrix.d = scale;
+    patternMatrix.e = mapOffset.x; patternMatrix.f = mapOffset.y;
+    cloudPattern.setTransform(patternMatrix);
+    
+    fogCtx.fillStyle = cloudPattern;
     fogCtx.fillRect(0, 0, width, height);
-    fogCtx.globalAlpha = 1.0; // Reset alpha
 
-    // 2. Shade fog with noise (no transparency) for visuals only
-    const pattern = fogCtx.createPattern(noisePattern, 'repeat');
-    fogCtx.globalCompositeOperation = 'multiply';
-    fogCtx.fillStyle = pattern;
+    if (allKnownHexagons.size === 0) return;
 
-    // Animate the drift
-    const dx = (animationTime * FOG_CONFIG.driftSpeed * width) % noisePattern.width;
-    const dy = (animationTime * FOG_CONFIG.driftSpeed * height) % noisePattern.height;
-    fogCtx.save();
-    fogCtx.translate(dx, dy);
-    fogCtx.globalAlpha = FOG_CONFIG.noiseIntensity;
-    const prevFilter = fogCtx.filter;
-    fogCtx.filter = 'blur(0.6px)';
-    fogCtx.fillRect(-dx, -dy, width, height);
-    fogCtx.filter = prevFilter || 'none';
-    fogCtx.restore();
-
-    // 3. Clear areas where fog has been "dispelled" with hexagon shapes
-    fogCtx.globalCompositeOperation = 'destination-out';
+    // --- ОПТИМИЗАЦИЯ: Фильтруем гексагоны, оставляя только видимые на экране ---
+    const bounds = map.getBounds();
+    // Добавляем небольшой отступ, чтобы гексагоны на границе не исчезали резко
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
+    const paddingLat = (ne.lat - sw.lat) * 0.1;
+    const paddingLng = (ne.lng - sw.lng) * 0.1;
+    
+    const visibleHexagons = [];
     allKnownHexagons.forEach(hexId => {
       try {
+        const center = h3.cellToLatLng(hexId); // [lat, lng]
+        if (center[0] > sw.lat - paddingLat && center[0] < ne.lat + paddingLat &&
+            center[1] > sw.lng - paddingLng && center[1] < ne.lng + paddingLng) {
+          visibleHexagons.push(hexId);
+        }
+      } catch (e) {}
+    });
+    // --- КОНЕЦ ОПТИМИЗАЦИИ ---
+
+    // Этап А: Тень под облаками
+    fogCtx.globalCompositeOperation = 'destination-out';
+    fogCtx.filter = `blur(${FOG_CONFIG.shadowBlur}px)`;
+    // Используем отфильтрованный массив visibleHexagons вместо allKnownHexagons
+    visibleHexagons.forEach(hexId => {
+      try {
         const boundary = h3.cellToBoundary(hexId);
-        const center = h3.cellToLatLng(hexId);
-
-        // Convert hexagon boundary to screen coordinates
         const screenPoints = boundary.map(([lat, lng]) => map.project([lng, lat]));
-
-        // Calculate hexagon center on screen
-        const centerPixels = map.project([center[1], center[0]]);
-
-        // Add slight pulsing to hexagons for more dynamic effect
-        const hexPulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + center[0] * 10 + center[1] * 10) * FOG_CONFIG.pulseAmplitude;
-
-        // Create hexagon path
         fogCtx.beginPath();
         fogCtx.moveTo(screenPoints[0].x, screenPoints[0].y);
-        for (let i = 1; i < screenPoints.length; i++) {
-          fogCtx.lineTo(screenPoints[i].x, screenPoints[i].y);
-        }
+        for (let i = 1; i < screenPoints.length; i++) fogCtx.lineTo(screenPoints[i].x, screenPoints[i].y);
         fogCtx.closePath();
-
-        // Two-phase reveal: 1) clear hole 2) draw subtle rim in multiply
-        // 1) Clear hole fully
-        fogCtx.fillStyle = 'rgba(255,255,255,1)';
+        fogCtx.fillStyle = 'rgba(0, 0, 0, 0.85)';
         fogCtx.fill();
-
-        // 2) Subtle rim for visible boundaries
-        const bounds = fogCtx.getPathBounds ? fogCtx.getPathBounds() : {
-          left: Math.min(...screenPoints.map(p => p.x)),
-          right: Math.max(...screenPoints.map(p => p.x)),
-          top: Math.min(...screenPoints.map(p => p.y)),
-          bottom: Math.max(...screenPoints.map(p => p.y))
-        };
-        const hexagonRadius = Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) * hexPulse / 2;
-        const rimRadius = hexagonRadius * 1.08;
-        const gradient = fogCtx.createRadialGradient(
-          centerPixels.x, centerPixels.y, hexagonRadius * 0.9,
-          centerPixels.x, centerPixels.y, rimRadius
-        );
-        gradient.addColorStop(0.0, 'rgba(0,0,0,0)');
-        gradient.addColorStop(1.0, 'rgba(0,0,0,0.7)');
-        fogCtx.save();
-        fogCtx.globalCompositeOperation = 'multiply';
-        fogCtx.fillStyle = gradient;
-        fogCtx.fill();
-        fogCtx.restore();
-      } catch (error) {
-        console.warn('[fog] Error drawing hexagon:', hexId, error);
-      }
+      } catch (e) {}
     });
+
+    // Этап Б: Дыра в облаках
+    fogCtx.filter = `blur(${FOG_CONFIG.revealBlur}px)`;
+    // Используем отфильтрованный массив visibleHexagons и здесь
+    visibleHexagons.forEach(hexId => {
+        try {
+            const boundary = h3.cellToBoundary(hexId);
+            const screenPoints = boundary.map(([lat, lng]) => map.project([lng, lat]));
+            const center = h3.cellToLatLng(hexId);
+            const pulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + center[0] + center[1]) * FOG_CONFIG.pulseAmplitude;
+
+            fogCtx.save();
+            const centerPixels = map.project([center[1], center[0]]);
+            fogCtx.translate(centerPixels.x, centerPixels.y);
+            fogCtx.scale(pulse, pulse);
+            fogCtx.translate(-centerPixels.x, -centerPixels.y);
+
+            fogCtx.beginPath();
+            fogCtx.moveTo(screenPoints[0].x, screenPoints[0].y);
+            for (let i = 1; i < screenPoints.length; i++) fogCtx.lineTo(screenPoints[i].x, screenPoints[i].y);
+            fogCtx.closePath();
+            fogCtx.fillStyle = 'white';
+            fogCtx.fill();
+            fogCtx.restore();
+        } catch (e) {}
+    });
+
+    fogCtx.filter = 'none';
     fogCtx.globalCompositeOperation = 'source-over';
   }
 
-  // Animation loop
-  function animateFog() {
-    // The loop is controlled by start/stop functions.
-    // We request the next frame first.
-    animationFrameId = requestAnimationFrame(animateFog);
-
-    // Check if enough time has passed to draw the next frame.
-    const now = performance.now();
-    const elapsed = now - then;
-
-    if (elapsed > FPS_INTERVAL) {
-      // Adjust 'then' to maintain a consistent framerate, preventing drift.
-      then = now - (elapsed % FPS_INTERVAL);
-
-      // Run the core animation and drawing logic.
-      animationTime++;
-      drawFog();
-    }
-  }
-
-  function startFogAnimation() {
-    if (fogEnabled && !animationFrameId) {
-      then = performance.now(); // Reset timer.
-      animateFog();
-    }
-  }
-
-  function stopFogAnimation() {
-    if (animationFrameId) {
-      cancelAnimationFrame(animationFrameId);
-      animationFrameId = null;
-    }
-  }
-
-  // --- Data Fetching Logic ---
+  // --- Остальной код ---
   const loader = document.getElementById('loader');
-
   async function updateHexagonsFromServer() {
     if (isFetching) return;
     isFetching = true;
-
-    const loaderTimeout = setTimeout(() => {
-      if (loader) loader.style.display = 'flex';
-    }, 500); // Only show loader if request takes > 300ms
-
+    const loaderTimeout = setTimeout(() => { if (loader) loader.style.display = 'flex'; }, 500);
     try {
       const bounds = map.getBounds();
       const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(',');
@@ -344,8 +304,10 @@
           newHexagons++;
         }
       });
-      // Fog will be updated automatically by animation loop
+      if (newHexagons > 0) {
       countEl.textContent = allKnownHexagons.size.toLocaleString();
+      }
+      map.triggerRepaint();
     } catch (error) {
       console.error('[fog] Failed to fetch hexagons:', error);
     } finally {
@@ -355,59 +317,33 @@
     }
   }
 
-  // --- Event Handlers ---
   map.on('load', () => {
     const mapContainer = document.getElementById('map-container');
-
-    // --- РЕШЕНИЕ ПРОБЛЕМЫ ---
-    // 1. Находим контейнер с кнопками, который создал MapLibre.
     const controls = mapContainer.querySelector('.maplibregl-control-container');
     if (controls) {
-      // 2. "Вынимаем" его из карты и вставляем как прямой дочерний элемент #map-container.
-      // Теперь он является "соседом" карты и холста, а не их "потомком".
       mapContainer.appendChild(controls);
     }
-    // -------------------------
-
     const resizeObserver = new ResizeObserver(() => {
       const cssW = mapContainer.clientWidth;
       const cssH = mapContainer.clientHeight;
-      // Style size in CSS pixels
       fogCanvas.style.width = cssW + 'px';
       fogCanvas.style.height = cssH + 'px';
-      // Backing store size in device pixels
       fogCanvas.width = Math.max(1, Math.floor(cssW * DPR));
       fogCanvas.height = Math.max(1, Math.floor(cssH * DPR));
-      // Scale context so that drawing uses CSS pixel coordinates
       fogCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      // Fog will be redrawn automatically by animation loop
     });
     resizeObserver.observe(mapContainer);
-
     updateHexagonsFromServer();
-
     try { geolocate.trigger(); } catch (e) { console.error(e); }
 
-    // Start fog animation if enabled
-    startFogAnimation();
+    map.on('render', drawFog);
   });
 
-  // Map events - fog animation handles redrawing automatically
   map.on('moveend', updateHexagonsFromServer);
-  map.on('zoomend', updateHexagonsFromServer);
   
-  function tryLocateCenter() {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 15 }),
-      (err) => console.warn('[geo] getCurrentPosition error:', err.message)
-    );
-  }
   let lastKnownPosition = null;
-  // При нажатии кнопки геолокации приближать минимум до целевого зума
   const TARGET_GEO_ZOOM = 17;
-
-  openBtn.disabled = true; // Disable by default
+  openBtn.disabled = true;
   openBtn.textContent = 'Определение...';
 
   geolocate.on('geolocate', (pos) => {
@@ -425,17 +361,12 @@
     } else {
       openBtn.textContent = 'Геолокация не удалась';
     }
-    // Maybe show a message to the user here
   });
 
   openBtn.addEventListener('click', async () => {
     if (!lastKnownPosition) {
-      // This should not happen if the button is disabled
-      if (noAuthMode) {
-        alert('Используйте клик на карту для добавления точек.');
-      } else {
-        alert('Местоположение не определено.');
-      }
+      if (noAuthMode) { alert('Используйте клик на карту для добавления точек.'); } 
+      else { alert('Местоположение не определено.'); }
       return;
     }
     openBtn.disabled = true;
@@ -448,12 +379,11 @@
       if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
       const result = await response.json();
       if (result.added > 0) {
-        // Convert the visited location to hexagon ID
-        const h3Resolution = window.currentH3Resolution || 11; // Use current resolution or default
+        const h3Resolution = window.currentH3Resolution || 11;
         const hexId = h3.latLngToCell(lastKnownPosition.latitude, lastKnownPosition.longitude, h3Resolution);
         allKnownHexagons.add(hexId);
         countEl.textContent = allKnownHexagons.size.toLocaleString();
-        // Fog will be updated automatically by animation loop
+        map.triggerRepaint();
       }
     } catch (error) {
       console.error('[visit] Failed to visit area:', error);
@@ -462,19 +392,13 @@
     }
   });
 
-  // --- Fog Toggle Handler ---
   toggleFogBtn.addEventListener('click', () => {
     fogEnabled = !fogEnabled;
     toggleFogBtn.textContent = fogEnabled ? 'Скрыть туман' : 'Показать туман';
-    if (fogEnabled) {
-      startFogAnimation();
-    } else {
-      stopFogAnimation();
-      fogCtx.clearRect(0, 0, fogCanvas.width, fogCanvas.height);
-    }
+    map.triggerRepaint();
   });
 
-  // --- Debug UI: radius slider + delete mode ---
+  // UI для отладки
   const radiusSlider = document.getElementById('radiusSlider');
   const radiusValue = document.getElementById('radiusValue');
   const deleteModeBtn = document.getElementById('deleteModeBtn');
@@ -490,7 +414,6 @@
     }
   }
 
-  // Show debug panel only in noAuthMode
   if (isNoAuthMode) {
     if (debugPanel) debugPanel.style.display = 'flex';
   }
@@ -503,40 +426,25 @@
     radiusValue.textContent = radiusSlider.value;
     radiusSlider.addEventListener('input', async () => {
       radiusValue.textContent = radiusSlider.value;
-      const radiusValue = parseInt(radiusSlider.value, 10);
-
-      // Map radius to H3 resolution (same logic as backend)
+      const radiusValueNum = parseInt(radiusSlider.value, 10);
       let h3Resolution;
-      if (radiusValue <= 30) {
-        h3Resolution = 13;  // Small hexagons (~100m)
-      } else if (radiusValue <= 70) {
-        h3Resolution = 12;  // Medium-small hexagons (~200m)
-      } else if (radiusValue <= 150) {
-        h3Resolution = 11;  // Medium hexagons (~400m)
-      } else {
-        h3Resolution = 10;  // Large hexagons (~800m)
-      }
-
+      if (radiusValueNum <= 30) h3Resolution = 13;
+      else if (radiusValueNum <= 70) h3Resolution = 12;
+      else if (radiusValueNum <= 150) h3Resolution = 11;
+      else h3Resolution = 10;
       try {
         const response = await fetch('/api/v1/radius', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Telegram-Init': tg ? tg.initData : '' },
-          body: JSON.stringify({ radius_m: radiusValue })
+          body: JSON.stringify({ radius_m: radiusValueNum })
         });
         if (!response.ok) throw new Error('radius update failed');
-
         const result = await response.json();
-
-        // Store current H3 resolution for use in hexagon operations
         window.currentH3Resolution = h3Resolution;
-
-        // If resolution changed, backend cleared all data, so we need to clear local cache too
         if (result.resolution_changed) {
           allKnownHexagons.clear();
           console.log('H3 resolution changed, cleared local hexagon cache');
         }
-
-        // Refresh data from server
         updateHexagonsFromServer();
       } catch (e) {
         console.warn('[debug] radius update error', e);
@@ -544,7 +452,6 @@
     });
   }
 
-  // Debug: clear DB button (available only in dev/no-auth modes from backend)
   if (clearDbBtn) {
     clearDbBtn.addEventListener('click', async () => {
       if (!confirm('Очистить всю БД? Это действие необратимо.')) return;
@@ -554,8 +461,7 @@
         const data = await res.json().catch(() => ({}));
         allKnownHexagons.clear();
         countEl.textContent = '0';
-        // немедленно перерисуем туман
-        drawFog();
+        map.triggerRepaint();
         alert(`БД очищена. circles=${data.cleared_circles ?? '?'}, users=${data.cleared_users ?? '?'}`);
       } catch (e) {
         alert('Ошибка очистки БД');
@@ -564,61 +470,45 @@
     });
   }
 
-  // Добавление точки по клику в no-auth режиме (если геолокация недоступна)
   map.on('click', async (e) => {
-    // Режим добавления точек в no-auth режиме без геолокации
     if (noAuthMode && !lastKnownPosition && !deleteMode) {
       const lngLat = map.unproject(e.point);
-      const lat = lngLat.lat;
-      const lng = lngLat.lng;
-
       try {
         const response = await fetch('/api/v1/visit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Telegram-Init': tg ? tg.initData : '' },
-          body: JSON.stringify({ lat: lat, lon: lng })
+          body: JSON.stringify({ lat: lngLat.lat, lon: lngLat.lng })
         });
         if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
         const result = await response.json();
         if (result.added > 0) {
-          // Convert the visited location to hexagon ID
-          const h3Resolution = window.currentH3Resolution || 11; // Use current resolution or default
-          const hexId = h3.latLngToCell(lat, lng, h3Resolution);
+          const h3Resolution = window.currentH3Resolution || 11;
+          const hexId = h3.latLngToCell(lngLat.lat, lngLat.lng, h3Resolution);
           allKnownHexagons.add(hexId);
           countEl.textContent = allKnownHexagons.size.toLocaleString();
-          // Fog will be updated automatically by animation loop
+          map.triggerRepaint();
         }
       } catch (error) {
         console.error('[visit] Failed to visit area by click:', error);
       }
-      return; // Не продолжаем с логикой удаления
+      return;
     }
 
     if (!deleteMode) return;
 
-    // Convert click coordinates to lat/lng
     const lngLat = map.unproject(e.point);
-    const lat = lngLat.lat;
-    const lng = lngLat.lng;
-
-    // Find hexagon that contains this point
     let targetHexId = null;
     allKnownHexagons.forEach(hexId => {
       try {
-        // Check if the point is in this hexagon
-        const h3Resolution = window.currentH3Resolution || 11; // Use current resolution or default
-        const pointCell = h3.latLngToCell(lat, lng, h3Resolution);
+        const h3Resolution = window.currentH3Resolution || 11;
+        const pointCell = h3.latLngToCell(lngLat.lat, lngLat.lng, h3Resolution);
         if (pointCell === hexId) {
           targetHexId = hexId;
         }
-      } catch (error) {
-        // Ignore invalid hexagons
-      }
+      } catch (error) {}
     });
 
-    if (!targetHexId) return; // No hexagon found at click location
-
-    // Get center coordinates of the hexagon for deletion
+    if (!targetHexId) return;
     const center = h3.cellToLatLng(targetHexId);
     try {
       const response = await fetch(`/api/v1/circle?lat=${center[0]}&lon=${center[1]}`, {
@@ -630,7 +520,7 @@
       if (res.deleted > 0) {
         allKnownHexagons.delete(targetHexId);
         countEl.textContent = allKnownHexagons.size.toLocaleString();
-        // Fog will be updated automatically by animation loop
+        map.triggerRepaint();
       }
     } catch (err) {
       console.warn('[debug] delete error', err);
