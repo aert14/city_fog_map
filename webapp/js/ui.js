@@ -6,24 +6,31 @@
 import * as API from './api.js';
 
 /**
- * A collection of all DOM elements used by the application,
- * selected once at startup for efficiency.
+ * A collection of all DOM elements used by the application.
+ * This object is populated by the `initElements` function.
  */
-export const elements = {
-    app: document.getElementById('app'),
-    toolbar: document.getElementById('toolbar'),
-    openBtn: document.getElementById('openBtn'),
-    toggleFogBtn: document.getElementById('toggleFogBtn'),
-    countEl: document.getElementById('count'),
-    fogCanvas: document.getElementById('fog-canvas'),
-    mapContainer: document.getElementById('map-container'),
-    loader: document.getElementById('loader'),
-    debugPanel: document.getElementById('debugPanel'),
-    radiusSlider: document.getElementById('radiusSlider'),
-    radiusValue: document.getElementById('radiusValue'),
-    deleteModeBtn: document.getElementById('deleteModeBtn'),
-    clearDbBtn: document.getElementById('clearDbBtn'),
-};
+export const elements = {};
+
+/**
+ * Selects all DOM elements and stores them in the `elements` object.
+ * This must be called after the DOM is fully loaded.
+ */
+export function initElements() {
+    elements.app = document.getElementById('app');
+    elements.toolbar = document.getElementById('toolbar');
+    elements.openBtn = document.getElementById('openBtn');
+    elements.toggleFogBtn = document.getElementById('toggleFogBtn');
+    elements.countEl = document.getElementById('count');
+    elements.fogCanvas = document.getElementById('fog-canvas');
+    elements.mapContainer = document.getElementById('map-container');
+    elements.loader = document.getElementById('loader');
+    elements.debugPanel = document.getElementById('debugPanel');
+    elements.radiusSlider = document.getElementById('radiusSlider');
+    elements.radiusValue = document.getElementById('radiusValue');
+    elements.deleteModeBtn = document.getElementById('deleteModeBtn');
+    elements.clearDbBtn = document.getElementById('clearDbBtn');
+}
+
 
 /**
  * Initializes all event listeners for the UI.
