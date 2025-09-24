@@ -1,28 +1,37 @@
-  (async function(){
-  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  if (tg) { try { tg.ready(); } catch (_) {} }
+(async function () {
+  const tg =
+    window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg) {
+    try {
+      tg.ready();
+    } catch (_) {}
+  }
 
   async function getDebugSettings() {
     try {
-      const response = await fetch('/api/v1/debug-mode');
+      const response = await fetch("/api/v1/debug-mode");
       if (!response.ok) return { noAuthMode: false, debugAuthMode: false };
       const data = await response.json();
       return {
         noAuthMode: !!data.no_auth_mode,
         debugAuthMode: !!data.debug_auth_mode,
-        baseVisitResolution: typeof data.base_visit_resolution === 'number' ? data.base_visit_resolution : undefined
+        baseVisitResolution:
+          typeof data.base_visit_resolution === "number"
+            ? data.base_visit_resolution
+            : undefined,
       };
     } catch (error) {
-      console.warn('[auth] Failed to check debug mode:', error);
+      console.warn("[auth] Failed to check debug mode:", error);
       return { noAuthMode: false, debugAuthMode: false };
     }
   }
 
   const hasInitData = !!(tg && tg.initData);
-  const { noAuthMode, debugAuthMode, baseVisitResolution } = await getDebugSettings();
+  const { noAuthMode, debugAuthMode, baseVisitResolution } =
+    await getDebugSettings();
 
   if (!hasInitData && !noAuthMode) {
-    document.getElementById('app').innerHTML = `
+    document.getElementById("app").innerHTML = `
       <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; font-family: sans-serif; color: #ccc;">
         <h2 style="margin: 0; color: #eee;">Oops!</h2>
         <p style="margin: 8px 0 0;">Could not initialize the application.<br>Please make sure you are running this inside Telegram.</p>
@@ -32,12 +41,19 @@
   }
 
   // --- UI & Config ---
-  const openBtn = document.getElementById('openBtn');
-  const toggleFogBtn = document.getElementById('toggleFogBtn');
-  const countEl = document.getElementById('count');
-  const statusEl = document.getElementById('status');
-  const fogCanvas = document.getElementById('fog-canvas');
-  const fogCtx = fogCanvas.getContext('2d');
+  const openBtn = document.getElementById("openBtn");
+  const leaderboardBtn = document.getElementById("leaderboardBtn");
+  const leaderboardOverlay = document.getElementById("leaderboard-overlay");
+  const leaderboardCloseBtn = document.getElementById("leaderboardCloseBtn");
+  const leaderboardLevelSelect = document.getElementById("leaderboardLevel");
+  const leaderboardPeriodSelect = document.getElementById("leaderboardPeriod");
+  const leaderboardStatus = document.getElementById("leaderboardStatus");
+  const leaderboardBody = document.getElementById("leaderboardBody");
+  const toggleFogBtn = document.getElementById("toggleFogBtn");
+  const countEl = document.getElementById("count");
+  const statusEl = document.getElementById("status");
+  const fogCanvas = document.getElementById("fog-canvas");
+  const fogCtx = fogCanvas.getContext("2d");
   const DPR = window.devicePixelRatio || 1;
 
   const FOG_CONFIG = {
@@ -49,11 +65,15 @@
 
   // --- Map Initialization ---
   const map = new maplibregl.Map({
-    container: 'map',
-    style: 'https://api.maptiler.com/maps/pastel/style.json?key=TFV5uV6DVVucu16gTZdi',
+    container: "map",
+    style:
+      "https://api.maptiler.com/maps/pastel/style.json?key=TFV5uV6DVVucu16gTZdi",
     center: [37.6173, 55.7558],
     zoom: 12,
-    maxBounds: [[36.0, 55.0], [39.0, 56.5]]
+    maxBounds: [
+      [36.0, 55.0],
+      [39.0, 56.5],
+    ],
   });
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
   const geolocate = new maplibregl.GeolocateControl({
@@ -61,9 +81,13 @@
     trackUserLocation: false,
     showUserHeading: true,
     showAccuracyCircle: false,
-    fitBoundsOptions: { maxZoom: 22 }
+    fitBoundsOptions: { maxZoom: 22 },
   });
-  try { if (geolocate && geolocate._updateCamera) { geolocate._updateCamera = function(){}; } } catch (_) {}
+  try {
+    if (geolocate && geolocate._updateCamera) {
+      geolocate._updateCamera = function () {};
+    }
+  } catch (_) {}
   map.addControl(geolocate);
 
   // --- Application State ---
@@ -71,57 +95,220 @@
   let isFetching = false;
   let fogEnabled = true;
   let animationTime = 0;
-  const defaultVisitResolution = baseVisitResolution || window.__CITY_FOG_BASE_RESOLUTION__ || 8;
+  const defaultVisitResolution =
+    baseVisitResolution || window.__CITY_FOG_BASE_RESOLUTION__ || 8;
   const BASE_DISTRICT_RESOLUTION = defaultVisitResolution;
   window.currentH3Resolution = defaultVisitResolution;
   // Prevent accidental clicks after dragging/zooming the map (phantom circles)
   let ignoreNextClick = false;
-  const emptyFeatureCollection = { type: 'FeatureCollection', features: [] };
+  const emptyFeatureCollection = { type: "FeatureCollection", features: [] };
   const ADMIN_FETCH_DEBOUNCE_MS = 360;
   const ADMIN_FETCH_IDLE_MS = 120;
   let adminUpdateTimer = null;
   let adminRequestSeq = 0;
   let adminFetchAbortController = null;
   let selectedDistrictId = null;
-  let selectedDistrictName = '';
+  let selectedDistrictName = "";
   let selectedDistrictFeature = null;
   let selectedDistrictAbortController = null;
   let selectedDistrictResView = null;
-  const DEFAULT_STATUS_TEXT = 'Select a district';
+  const DEFAULT_STATUS_TEXT = "Select a district";
   const districtFeatureMap = new Map();
   const okrugFeatureMap = new Map();
   const districtCellsCache = new Map();
   let statusOverrideMessage = null;
-  const labelOverlayEl = document.getElementById('label-overlay');
+  const labelOverlayEl = document.getElementById("label-overlay");
   const overlayLabels = new Map();
 
+  const leaderboardState = {
+    isOpen: false,
+    level: "district",
+    period: "week",
+    entries: [],
+    loading: false,
+    error: null,
+  };
+  let leaderboardAbortController = null;
+
+  function showLeaderboard() {
+    if (!leaderboardOverlay) return;
+    leaderboardOverlay.classList.add("visible");
+    leaderboardState.isOpen = true;
+    leaderboardStatus.textContent = "";
+    fetchLeaderboard();
+  }
+
+  function hideLeaderboard() {
+    if (!leaderboardOverlay) return;
+    leaderboardOverlay.classList.remove("visible");
+    leaderboardState.isOpen = false;
+    if (leaderboardAbortController) {
+      leaderboardAbortController.abort();
+      leaderboardAbortController = null;
+    }
+  }
+
+  function renderLeaderboard(entries) {
+    if (!leaderboardBody) return;
+    leaderboardBody.innerHTML = "";
+    if (!Array.isArray(entries) || entries.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 6;
+      cell.textContent = "No data yet. Explore the city to be the first!";
+      cell.style.textAlign = "center";
+      cell.style.padding = "20px";
+      row.appendChild(cell);
+      leaderboardBody.appendChild(row);
+      return;
+    }
+
+    entries.forEach((entry) => {
+      const row = document.createElement("tr");
+
+      const rankCell = document.createElement("td");
+      rankCell.textContent = entry.rank ?? "-";
+      rankCell.className = "rank";
+      row.appendChild(rankCell);
+
+      const userCell = document.createElement("td");
+      userCell.textContent = entry.username || `User ${entry.user_id ?? ""}`;
+      userCell.className = "username";
+      row.appendChild(userCell);
+
+      const cellsCell = document.createElement("td");
+      cellsCell.textContent =
+        typeof entry.visited_cells === "number"
+          ? entry.visited_cells.toLocaleString("ru-RU")
+          : "-";
+      row.appendChild(cellsCell);
+
+      const weightCell = document.createElement("td");
+      weightCell.textContent =
+        typeof entry.visited_weight === "number"
+          ? entry.visited_weight.toFixed(2)
+          : "-";
+      row.appendChild(weightCell);
+
+      const percentCellsCell = document.createElement("td");
+      percentCellsCell.textContent =
+        typeof entry.percent_cells === "number"
+          ? `${safeRound(entry.percent_cells)}%`
+          : "-";
+      row.appendChild(percentCellsCell);
+
+      const percentWeightCell = document.createElement("td");
+      percentWeightCell.textContent =
+        typeof entry.percent_weight === "number"
+          ? `${safeRound(entry.percent_weight)}%`
+          : "-";
+      row.appendChild(percentWeightCell);
+
+      leaderboardBody.appendChild(row);
+    });
+  }
+
+  function setLeaderboardLoading(isLoading) {
+    leaderboardState.loading = isLoading;
+    if (leaderboardStatus) {
+      leaderboardStatus.textContent = isLoading
+        ? "Loading…"
+        : leaderboardState.error || "";
+      leaderboardStatus.style.color = leaderboardState.error
+        ? "#f87171"
+        : "inherit";
+    }
+  }
+
+  async function fetchLeaderboard() {
+    if (!leaderboardState.isOpen) return;
+
+    if (leaderboardAbortController) {
+      leaderboardAbortController.abort();
+    }
+    const controller = new AbortController();
+    leaderboardAbortController = controller;
+
+    setLeaderboardLoading(true);
+    leaderboardState.error = null;
+
+    const params = new URLSearchParams({
+      level: leaderboardState.level,
+      period: leaderboardState.period,
+    });
+
+    try {
+      const response = await fetch(`/api/v1/leaderboard?${params.toString()}`, {
+        signal: controller.signal,
+        headers: getAuthHeaders({ Accept: "application/json" }),
+      });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      if (!controller.signal.aborted) {
+        leaderboardState.entries = Array.isArray(payload?.entries)
+          ? payload.entries
+          : [];
+        renderLeaderboard(leaderboardState.entries);
+        setLeaderboardLoading(false);
+      }
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      console.warn("[leaderboard] Failed to fetch leaderboard:", error);
+      leaderboardState.error = "Unable to load leaderboard.";
+      renderLeaderboard([]);
+      setLeaderboardLoading(false);
+    }
+  }
+
+  function handleLeaderboardLevelChange(event) {
+    const value = event?.target?.value;
+    if (!value || !["district", "okrug"].includes(value)) return;
+    leaderboardState.level = value;
+    fetchLeaderboard();
+  }
+
+  function handleLeaderboardPeriodChange(event) {
+    const value = event?.target?.value;
+    if (!value || !["week", "season"].includes(value)) return;
+    leaderboardState.period = value;
+    fetchLeaderboard();
+  }
+
+  function handleLeaderboardKey(event) {
+    if (event.key === "Escape" && leaderboardState.isOpen) {
+      hideLeaderboard();
+    }
+  }
+
   const ADMIN_SOURCES = {
-    districts: 'admin-districts',
-    okrugs: 'admin-okrugs',
-    selected: 'selected-district',
-    districtHex: 'district-hex-grid'
+    districts: "admin-districts",
+    okrugs: "admin-okrugs",
+    selected: "selected-district",
+    districtHex: "district-hex-grid",
   };
 
   const ADMIN_LAYERS = {
-    districtFill: 'district-fill',
-    districtBorders: 'district-borders',
-    districtLabels: 'district-labels',
-    districtHitArea: 'district-hit-area',
-    okrugBorders: 'okrug-borders',
-    okrugFill: 'okrug-fill',
-    selectedFill: 'selected-district-fill',
-    selectedOutline: 'selected-district-outline',
-    hexFill: 'selected-district-hex-fill',
-    hexOutline: 'selected-district-hex-outline'
+    districtFill: "district-fill",
+    districtBorders: "district-borders",
+    districtLabels: "district-labels",
+    districtHitArea: "district-hit-area",
+    okrugBorders: "okrug-borders",
+    okrugFill: "okrug-fill",
+    selectedFill: "selected-district-fill",
+    selectedOutline: "selected-district-outline",
+    hexFill: "selected-district-hex-fill",
+    hexOutline: "selected-district-hex-outline",
   };
 
   function getAuthHeaders(custom = {}) {
     const headers = { ...custom };
     if (tg && tg.initData) {
-      headers['X-Telegram-Init'] = tg.initData;
+      headers["X-Telegram-Init"] = tg.initData;
     }
-    if (typeof window.currentH3Resolution === 'number') {
-      headers['X-H3-Resolution'] = String(window.currentH3Resolution);
+    if (typeof window.currentH3Resolution === "number") {
+      headers["X-H3-Resolution"] = String(window.currentH3Resolution);
     }
     return headers;
   }
@@ -131,228 +318,246 @@
     try {
       return JSON.parse(JSON.stringify(feature));
     } catch (err) {
-      console.warn('[admin] Failed to clone feature', err);
+      console.warn("[admin] Failed to clone feature", err);
       return null;
     }
   }
 
   function featureProgressPercent(feature) {
+    const rawPercentCells = feature?.properties?.percent_cells;
+    if (typeof rawPercentCells === "number" && !Number.isNaN(rawPercentCells)) {
+      return rawPercentCells;
+    }
     const percent = feature?.properties?.progress_percent;
-    return typeof percent === 'number' && !Number.isNaN(percent) ? percent : null;
+    return typeof percent === "number" && !Number.isNaN(percent)
+      ? percent
+      : null;
+  }
+
+  function safeRound(value) {
+    return Math.max(0, Math.round(value));
   }
 
   function formatProgressPercent(percent) {
-    if (typeof percent !== 'number' || Number.isNaN(percent)) return null;
-    return `${Math.round(percent)}%`;
+    if (typeof percent !== "number" || Number.isNaN(percent)) return null;
+    return `${safeRound(percent)}%`;
+  }
+
+  function formatProgressSuffix(feature) {
+    const cells = feature?.properties?.percent_cells;
+    const weight = feature?.properties?.percent_weight;
+    const cellsLabel =
+      typeof cells === "number" && !Number.isNaN(cells)
+        ? `${safeRound(cells)}% клеток`
+        : null;
+    const weightLabel =
+      typeof weight === "number" && !Number.isNaN(weight)
+        ? `${safeRound(weight)}% веса`
+        : null;
+    if (cellsLabel && weightLabel && weightLabel !== cellsLabel) {
+      return `${cellsLabel} • ${weightLabel}`;
+    }
+    return cellsLabel || weightLabel;
   }
 
   function ensureAdminSourcesAndLayers() {
     if (!map.getSource(ADMIN_SOURCES.okrugs)) {
       map.addSource(ADMIN_SOURCES.okrugs, {
-        type: 'geojson',
-        data: emptyFeatureCollection
+        type: "geojson",
+        data: emptyFeatureCollection,
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.okrugFill)) {
       map.addLayer({
         id: ADMIN_LAYERS.okrugFill,
-        type: 'fill',
+        type: "fill",
         source: ADMIN_SOURCES.okrugs,
         paint: {
-          'fill-color': '#0ea5e9',
-          'fill-opacity': 0.05
+          "fill-color": "#0ea5e9",
+          "fill-opacity": 0.05,
         },
-        maxzoom: 12
+        maxzoom: 12,
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.okrugBorders)) {
       map.addLayer({
         id: ADMIN_LAYERS.okrugBorders,
-        type: 'line',
+        type: "line",
         source: ADMIN_SOURCES.okrugs,
         paint: {
-          'line-color': '#0f172a',
-          'line-width': [
-            'interpolate', ['linear'], ['zoom'],
-            8, 3.5,
-            14, 4.5
-          ],
-          'line-dasharray': [3, 2],
-          'line-opacity': 0.9
-        }
+          "line-color": "#0f172a",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 3.5, 14, 4.5],
+          "line-dasharray": [3, 2],
+          "line-opacity": 0.9,
+        },
       });
     }
 
     if (!map.getSource(ADMIN_SOURCES.districts)) {
       map.addSource(ADMIN_SOURCES.districts, {
-        type: 'geojson',
-        data: emptyFeatureCollection
+        type: "geojson",
+        data: emptyFeatureCollection,
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.districtFill)) {
       map.addLayer({
         id: ADMIN_LAYERS.districtFill,
-        type: 'fill',
+        type: "fill",
         source: ADMIN_SOURCES.districts,
         paint: {
-          'fill-color': '#38bdf8',
-          'fill-opacity': 0.08
+          "fill-color": "#38bdf8",
+          "fill-opacity": 0.08,
         },
         maxzoom: 12,
         layout: {
-          visibility: 'visible'
-        }
+          visibility: "visible",
+        },
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.districtHitArea)) {
       map.addLayer({
         id: ADMIN_LAYERS.districtHitArea,
-        type: 'fill',
+        type: "fill",
         source: ADMIN_SOURCES.districts,
         paint: {
-          'fill-opacity': 0
+          "fill-opacity": 0,
         },
-        filter: ['==', ['get', 'level'], 'district']
+        filter: ["==", ["get", "level"], "district"],
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.districtLabels)) {
       map.addLayer({
         id: ADMIN_LAYERS.districtLabels,
-        type: 'symbol',
+        type: "symbol",
         source: ADMIN_SOURCES.districts,
         layout: {
-          visibility: 'none'
-        }
+          visibility: "none",
+        },
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.districtBorders)) {
       map.addLayer({
         id: ADMIN_LAYERS.districtBorders,
-        type: 'line',
+        type: "line",
         source: ADMIN_SOURCES.districts,
         paint: {
-          'line-color': '#1f2937',
-          'line-width': [
-            'interpolate', ['linear'], ['zoom'],
-            8, 2.5,
-            14, 3.5
-          ],
-          'line-blur': 0.5,
-          'line-opacity': 0.95
-        }
+          "line-color": "#1f2937",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2.5, 14, 3.5],
+          "line-blur": 0.5,
+          "line-opacity": 0.95,
+        },
       });
     }
 
     if (!map.getSource(ADMIN_SOURCES.selected)) {
       map.addSource(ADMIN_SOURCES.selected, {
-        type: 'geojson',
-        data: emptyFeatureCollection
+        type: "geojson",
+        data: emptyFeatureCollection,
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.selectedFill)) {
       map.addLayer({
         id: ADMIN_LAYERS.selectedFill,
-        type: 'fill',
+        type: "fill",
         source: ADMIN_SOURCES.selected,
         paint: {
-          'fill-color': '#f97316',
-          'fill-opacity': 0.12
-        }
+          "fill-color": "#f97316",
+          "fill-opacity": 0.12,
+        },
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.selectedOutline)) {
       map.addLayer({
         id: ADMIN_LAYERS.selectedOutline,
-        type: 'line',
+        type: "line",
         source: ADMIN_SOURCES.selected,
         paint: {
-          'line-color': '#fb923c',
-          'line-width': [
-            'interpolate', ['linear'], ['zoom'],
-            8, 3.2,
-            14, 5
-          ],
-          'line-opacity': 0.9
-        }
+          "line-color": "#fb923c",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 3.2, 14, 5],
+          "line-opacity": 0.9,
+        },
       });
     }
 
     if (!map.getSource(ADMIN_SOURCES.districtHex)) {
       map.addSource(ADMIN_SOURCES.districtHex, {
-        type: 'geojson',
-        data: emptyFeatureCollection
+        type: "geojson",
+        data: emptyFeatureCollection,
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.hexFill)) {
       map.addLayer({
         id: ADMIN_LAYERS.hexFill,
-        type: 'fill',
+        type: "fill",
         source: ADMIN_SOURCES.districtHex,
         paint: {
-          'fill-color': [
-            'case',
-            ['boolean', ['get', 'visited'], false],
-            '#22c55e',
-            '#94a3b8'
+          "fill-color": [
+            "case",
+            ["boolean", ["get", "visited"], false],
+            "#22c55e",
+            "#94a3b8",
           ],
-          'fill-opacity': [
-            'case',
-            ['boolean', ['get', 'visited'], false],
+          "fill-opacity": [
+            "case",
+            ["boolean", ["get", "visited"], false],
             0.55,
             [
-              'interpolate', ['linear'],
-              ['coalesce', ['get', 'coverage'], 0],
-              0, 0.06,
-              1, 0.35
-            ]
-          ]
-        }
+              "interpolate",
+              ["linear"],
+              ["coalesce", ["get", "coverage"], 0],
+              0,
+              0.06,
+              1,
+              0.35,
+            ],
+          ],
+        },
       });
     }
 
     if (!map.getLayer(ADMIN_LAYERS.hexOutline)) {
       map.addLayer({
         id: ADMIN_LAYERS.hexOutline,
-        type: 'line',
+        type: "line",
         source: ADMIN_SOURCES.districtHex,
         paint: {
-          'line-color': '#1f2937',
-          'line-width': 0.65,
-          'line-opacity': 0.5
-        }
+          "line-color": "#1f2937",
+          "line-width": 0.65,
+          "line-opacity": 0.5,
+        },
       });
     }
   }
 
   function toFeatureCollection(features = []) {
-    return { type: 'FeatureCollection', features };
+    return { type: "FeatureCollection", features };
   }
 
   function calculateFeatureAreaKm2(feature) {
     if (!feature?.geometry) return null;
     try {
       const areaSqMeters = turf.area(feature);
-      if (typeof areaSqMeters !== 'number' || Number.isNaN(areaSqMeters)) {
+      if (typeof areaSqMeters !== "number" || Number.isNaN(areaSqMeters)) {
         return null;
       }
       return areaSqMeters / 1_000_000;
     } catch (err) {
-      console.warn('[area] Failed to compute feature area', err);
+      console.warn("[area] Failed to compute feature area", err);
       return null;
     }
   }
 
   function pickResByArea(areaKm2) {
-    if (typeof areaKm2 !== 'number' || Number.isNaN(areaKm2)) {
+    if (typeof areaKm2 !== "number" || Number.isNaN(areaKm2)) {
       return BASE_DISTRICT_RESOLUTION;
     }
     if (areaKm2 >= 3) {
@@ -364,7 +569,7 @@
   function getFeatureAreaKm2(feature) {
     if (!feature) return null;
     const stored = feature?.properties?.area_km2;
-    if (typeof stored === 'number' && !Number.isNaN(stored)) {
+    if (typeof stored === "number" && !Number.isNaN(stored)) {
       return stored;
     }
     const computed = calculateFeatureAreaKm2(feature);
@@ -376,19 +581,26 @@
 
   function mapDistrictApiFeature(raw) {
     if (!raw || !raw.geom) return null;
+    const percentCells =
+      raw.progress?.percent_cells ?? raw.progress?.percent ?? 0;
+    const percentWeight = raw.progress?.percent_weight ?? 0;
     const feature = {
-      type: 'Feature',
+      type: "Feature",
       geometry: raw.geom,
       properties: {
         id: raw.id,
         name: raw.name,
         level: raw.level,
         parent_id: raw.parent_id,
-        progress_percent: raw.progress?.percent ?? 0,
+        progress_percent: percentCells,
+        percent_cells: percentCells,
+        percent_weight: percentWeight,
         visited_cells: raw.progress?.visited_cells ?? 0,
         total_cells: raw.progress?.total_cells ?? 0,
-        bbox: raw.bbox ?? null
-      }
+        visited_weight: raw.progress?.visited_weight ?? 0,
+        total_weight: raw.progress?.total_weight ?? 0,
+        bbox: raw.bbox ?? null,
+      },
     };
     return feature;
   }
@@ -406,54 +618,70 @@
       bounds.getWest(),
       bounds.getSouth(),
       bounds.getEast(),
-      bounds.getNorth()
-    ].join(',');
+      bounds.getNorth(),
+    ].join(",");
 
     const controller = new AbortController();
     adminFetchAbortController = controller;
     const currentSeq = ++adminRequestSeq;
     const requestOptions = {
       signal: controller.signal,
-      headers: getAuthHeaders({ Accept: 'application/json' })
+      headers: getAuthHeaders({ Accept: "application/json" }),
     };
 
-    const okrugPromise = fetch(`/api/v1/districts?bbox=${bbox}&level=okrug`, requestOptions);
-    const districtPromise = fetch(`/api/v1/districts?bbox=${bbox}&level=district`, requestOptions);
+    const okrugPromise = fetch(
+      `/api/v1/districts?bbox=${bbox}&level=okrug`,
+      requestOptions,
+    );
+    const districtPromise = fetch(
+      `/api/v1/districts?bbox=${bbox}&level=district`,
+      requestOptions,
+    );
 
     Promise.all([okrugPromise, districtPromise])
       .then(async ([okrugRes, districtRes]) => {
         if (controller.signal.aborted) return;
-        if (!okrugRes.ok) throw new Error(`okrug fetch failed: ${okrugRes.status}`);
-        if (!districtRes.ok) throw new Error(`district fetch failed: ${districtRes.status}`);
+        if (!okrugRes.ok)
+          throw new Error(`okrug fetch failed: ${okrugRes.status}`);
+        if (!districtRes.ok)
+          throw new Error(`district fetch failed: ${districtRes.status}`);
 
         const [okrugData, districtData] = await Promise.all([
           okrugRes.json(),
-          districtRes.json()
+          districtRes.json(),
         ]);
 
         if (controller.signal.aborted || currentSeq !== adminRequestSeq) return;
 
         const okrugFeatures = [];
         okrugFeatureMap.clear();
-        okrugData.forEach(raw => {
+        okrugData.forEach((raw) => {
           const feature = mapDistrictApiFeature(raw);
           if (feature) {
+            const overlaySuffix = formatProgressSuffix(feature);
+            if (overlaySuffix) {
+              feature.properties.overlay_suffix = overlaySuffix;
+            }
             okrugFeatures.push(feature);
             okrugFeatureMap.set(raw.id, feature);
           }
         });
 
-    const districtFeatures = [];
-    districtFeatureMap.clear();
-    districtData.forEach(raw => {
-        const feature = mapDistrictApiFeature(raw);
-        if (feature) {
-          const areaKm2 = getFeatureAreaKm2(feature);
-          feature.properties.area_km2 = areaKm2;
-          districtFeatures.push(feature);
-          districtFeatureMap.set(raw.id, feature);
-        }
-      });
+        const districtFeatures = [];
+        districtFeatureMap.clear();
+        districtData.forEach((raw) => {
+          const feature = mapDistrictApiFeature(raw);
+          if (feature) {
+            const areaKm2 = getFeatureAreaKm2(feature);
+            feature.properties.area_km2 = areaKm2;
+            const overlaySuffix = formatProgressSuffix(feature);
+            if (overlaySuffix) {
+              feature.properties.overlay_suffix = overlaySuffix;
+            }
+            districtFeatures.push(feature);
+            districtFeatureMap.set(raw.id, feature);
+          }
+        });
 
         const okrugSource = map.getSource(ADMIN_SOURCES.okrugs);
         if (okrugSource) {
@@ -470,7 +698,8 @@
           const updatedFeature = districtFeatureMap.get(selectedDistrictId);
           if (updatedFeature) {
             selectedDistrictFeature = cloneFeature(updatedFeature);
-            selectedDistrictName = selectedDistrictFeature.properties?.name || selectedDistrictName;
+            selectedDistrictName =
+              selectedDistrictFeature.properties?.name || selectedDistrictName;
             updateSelectedDistrictHighlight();
             updateStatusForSelection();
           } else {
@@ -482,9 +711,9 @@
           setStatus(DEFAULT_STATUS_TEXT);
         }
       })
-      .catch(error => {
+      .catch((error) => {
         if (controller.signal.aborted) return;
-        console.warn('[admin] Failed to refresh admin layers:', error);
+        console.warn("[admin] Failed to refresh admin layers:", error);
       })
       .finally(() => {
         if (controller === adminFetchAbortController) {
@@ -520,9 +749,12 @@
       if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
       return;
     }
-    const percent = featureProgressPercent(selectedDistrictFeature);
-    const suffix = formatProgressPercent(percent);
-    const label = suffix ? `${selectedDistrictName} • ${suffix}` : selectedDistrictName;
+    const suffix =
+      formatProgressSuffix(selectedDistrictFeature) ||
+      formatProgressPercent(featureProgressPercent(selectedDistrictFeature));
+    const label = suffix
+      ? `${selectedDistrictName} • ${suffix}`
+      : selectedDistrictName;
     setStatus(label || DEFAULT_STATUS_TEXT);
   }
 
@@ -536,24 +768,45 @@
     }
 
     selectedDistrictId = districtId;
-    selectedDistrictFeature = cloneFeature(districtFeatureMap.get(districtId) || feature);
-    selectedDistrictName = selectedDistrictFeature?.properties?.name || `District ${districtId}`;
+    selectedDistrictFeature = cloneFeature(
+      districtFeatureMap.get(districtId) || feature,
+    );
+    selectedDistrictName =
+      selectedDistrictFeature?.properties?.name || `District ${districtId}`;
 
     updateSelectedDistrictHighlight();
     updateStatusForSelection();
 
-    const effectiveResView = selectedDistrictResView != null
-      ? selectedDistrictResView
-      : pickResByArea(getFeatureAreaKm2(selectedDistrictFeature));
+    const effectiveResView =
+      selectedDistrictResView != null
+        ? selectedDistrictResView
+        : pickResByArea(getFeatureAreaKm2(selectedDistrictFeature));
     const cacheKey = `${districtId}@${effectiveResView}`;
     const cached = districtCellsCache.get(cacheKey);
     if (cached) {
       updateDistrictHexLayer(cached.featureCollection);
       if (cached.meta?.district?.progress) {
         const progress = cached.meta.district.progress;
-        selectedDistrictFeature.properties.progress_percent = progress.percent ?? selectedDistrictFeature.properties.progress_percent;
-        selectedDistrictFeature.properties.visited_cells = progress.visited_cells ?? selectedDistrictFeature.properties.visited_cells;
-        selectedDistrictFeature.properties.total_cells = progress.total_cells ?? selectedDistrictFeature.properties.total_cells;
+        const percentCells = progress.percent_cells ?? progress.percent;
+        selectedDistrictFeature.properties.progress_percent =
+          percentCells ?? selectedDistrictFeature.properties.progress_percent;
+        selectedDistrictFeature.properties.percent_cells =
+          percentCells ?? selectedDistrictFeature.properties.percent_cells;
+        selectedDistrictFeature.properties.percent_weight =
+          progress.percent_weight ??
+          selectedDistrictFeature.properties.percent_weight;
+        selectedDistrictFeature.properties.visited_cells =
+          progress.visited_cells ??
+          selectedDistrictFeature.properties.visited_cells;
+        selectedDistrictFeature.properties.total_cells =
+          progress.total_cells ??
+          selectedDistrictFeature.properties.total_cells;
+        selectedDistrictFeature.properties.visited_weight =
+          progress.visited_weight ??
+          selectedDistrictFeature.properties.visited_weight;
+        selectedDistrictFeature.properties.total_weight =
+          progress.total_weight ??
+          selectedDistrictFeature.properties.total_weight;
         updateStatusForSelection();
       }
       return;
@@ -568,9 +821,26 @@
       updateDistrictHexLayer(cachedForRes.featureCollection);
       if (cachedForRes.meta?.district?.progress) {
         const progress = cachedForRes.meta.district.progress;
-        selectedDistrictFeature.properties.progress_percent = progress.percent ?? selectedDistrictFeature.properties.progress_percent;
-        selectedDistrictFeature.properties.visited_cells = progress.visited_cells ?? selectedDistrictFeature.properties.visited_cells;
-        selectedDistrictFeature.properties.total_cells = progress.total_cells ?? selectedDistrictFeature.properties.total_cells;
+        const percentCells = progress.percent_cells ?? progress.percent;
+        selectedDistrictFeature.properties.progress_percent =
+          percentCells ?? selectedDistrictFeature.properties.progress_percent;
+        selectedDistrictFeature.properties.percent_cells =
+          percentCells ?? selectedDistrictFeature.properties.percent_cells;
+        selectedDistrictFeature.properties.percent_weight =
+          progress.percent_weight ??
+          selectedDistrictFeature.properties.percent_weight;
+        selectedDistrictFeature.properties.visited_cells =
+          progress.visited_cells ??
+          selectedDistrictFeature.properties.visited_cells;
+        selectedDistrictFeature.properties.total_cells =
+          progress.total_cells ??
+          selectedDistrictFeature.properties.total_cells;
+        selectedDistrictFeature.properties.visited_weight =
+          progress.visited_weight ??
+          selectedDistrictFeature.properties.visited_weight;
+        selectedDistrictFeature.properties.total_weight =
+          progress.total_weight ??
+          selectedDistrictFeature.properties.total_weight;
         updateStatusForSelection();
       }
       return;
@@ -587,7 +857,7 @@
     const wasSelected = selectedDistrictId != null;
     const previousId = selectedDistrictId;
     selectedDistrictId = null;
-    selectedDistrictName = '';
+    selectedDistrictName = "";
     selectedDistrictFeature = null;
     selectedDistrictResView = null;
     updateSelectedDistrictHighlight();
@@ -596,11 +866,11 @@
     if (wasSelected && previousId != null) {
       const deleteKeys = [];
       districtCellsCache.forEach((_, key) => {
-        if (typeof key === 'string' && key.startsWith(`${previousId}@`)) {
+        if (typeof key === "string" && key.startsWith(`${previousId}@`)) {
           deleteKeys.push(key);
         }
       });
-      deleteKeys.forEach(key => districtCellsCache.delete(key));
+      deleteKeys.forEach((key) => districtCellsCache.delete(key));
     }
   }
 
@@ -618,17 +888,38 @@
         if (selectedDistrictId === districtId) {
           selectedDistrictResView = resValue;
           if (payload?.district?.progress) {
-            selectedDistrictFeature.properties.progress_percent = payload.district.progress.percent ?? selectedDistrictFeature.properties.progress_percent;
-            selectedDistrictFeature.properties.visited_cells = payload.district.progress.visited_cells ?? selectedDistrictFeature.properties.visited_cells;
-            selectedDistrictFeature.properties.total_cells = payload.district.progress.total_cells ?? selectedDistrictFeature.properties.total_cells;
+            selectedDistrictFeature.properties.progress_percent =
+              payload.district.progress.percent_cells ??
+              payload.district.progress.percent ??
+              selectedDistrictFeature.properties.progress_percent;
+            selectedDistrictFeature.properties.percent_cells =
+              payload.district.progress.percent_cells ??
+              selectedDistrictFeature.properties.percent_cells;
+            selectedDistrictFeature.properties.percent_weight =
+              payload.district.progress.percent_weight ??
+              selectedDistrictFeature.properties.percent_weight;
+            selectedDistrictFeature.properties.visited_cells =
+              payload.district.progress.visited_cells ??
+              selectedDistrictFeature.properties.visited_cells;
+            selectedDistrictFeature.properties.total_cells =
+              payload.district.progress.total_cells ??
+              selectedDistrictFeature.properties.total_cells;
+            selectedDistrictFeature.properties.visited_weight =
+              payload.district.progress.visited_weight ??
+              selectedDistrictFeature.properties.visited_weight;
+            selectedDistrictFeature.properties.total_weight =
+              payload.district.progress.total_weight ??
+              selectedDistrictFeature.properties.total_weight;
             const existingFeature = districtFeatureMap.get(districtId);
             if (existingFeature) {
               existingFeature.properties = {
                 ...existingFeature.properties,
-                progress_percent: selectedDistrictFeature.properties.progress_percent,
+                progress_percent:
+                  selectedDistrictFeature.properties.progress_percent,
+                percent_cells: selectedDistrictFeature.properties.percent_cells,
                 visited_cells: selectedDistrictFeature.properties.visited_cells,
                 total_cells: selectedDistrictFeature.properties.total_cells,
-                area_km2: selectedDistrictFeature.properties.area_km2
+                area_km2: selectedDistrictFeature.properties.area_km2,
               };
             }
           }
@@ -636,11 +927,14 @@
           updateStatusForSelection();
         }
       })
-      .catch(error => {
+      .catch((error) => {
         if (controller.signal.aborted) return;
-        console.warn('[district] Failed to fetch district cells', error);
+        console.warn("[district] Failed to fetch district cells", error);
         if (selectedDistrictId === districtId) {
-          setStatus('Failed to load district cells', { temporary: true, state: 'error' });
+          setStatus("Failed to load district cells", {
+            temporary: true,
+            state: "error",
+          });
         }
       })
       .finally(() => {
@@ -653,7 +947,7 @@
   function buildHexFeatureCollection(cells, districtId) {
     const features = [];
     if (Array.isArray(cells)) {
-      cells.forEach(cell => {
+      cells.forEach((cell) => {
         if (!cell || !cell.h3) return;
         try {
           const boundary = h3.cellToBoundary(cell.h3, true);
@@ -663,23 +957,23 @@
             coordinates.push(coordinates[0]);
           }
           features.push({
-            type: 'Feature',
+            type: "Feature",
             geometry: {
-              type: 'Polygon',
-              coordinates: [coordinates]
+              type: "Polygon",
+              coordinates: [coordinates],
             },
             properties: {
               h3: cell.h3,
-              coverage: typeof cell.coverage === 'number' ? cell.coverage : 0,
+              coverage: typeof cell.coverage === "number" ? cell.coverage : 0,
               visited: !!cell.visited,
               visited_children: cell.visited_children ?? null,
               total_children: cell.total_children ?? null,
               visited_fraction: cell.visited_fraction ?? null,
-              district_id: districtId
-            }
+              district_id: districtId,
+            },
           });
         } catch (err) {
-          console.warn('[h3] Failed to build hex geometry', cell?.h3, err);
+          console.warn("[h3] Failed to build hex geometry", cell?.h3, err);
         }
       });
     }
@@ -692,21 +986,34 @@
     source.setData(featureCollection || emptyFeatureCollection);
   }
 
-  async function fetchDistrictCellsRaw(districtId, resView = null, options = {}) {
+  async function fetchDistrictCellsRaw(
+    districtId,
+    resView = null,
+    options = {},
+  ) {
     const { signal } = options;
-    const resParam = typeof resView === 'number' ? `?res_view=${resView}` : '';
-    const response = await fetch(`/api/v1/district/${districtId}/cells${resParam}`, {
-      signal,
-      headers: getAuthHeaders({ Accept: 'application/json' })
-    });
+    const resParam = typeof resView === "number" ? `?res_view=${resView}` : "";
+    const response = await fetch(
+      `/api/v1/district/${districtId}/cells${resParam}`,
+      {
+        signal,
+        headers: getAuthHeaders({ Accept: "application/json" }),
+      },
+    );
     if (!response.ok) {
       throw new Error(`Failed to fetch district cells: ${response.status}`);
     }
     const payload = await response.json();
-    const effectiveRes = typeof payload?.resolution === 'number' ? payload.resolution : BASE_DISTRICT_RESOLUTION;
+    const effectiveRes =
+      typeof payload?.resolution === "number"
+        ? payload.resolution
+        : BASE_DISTRICT_RESOLUTION;
     const resValue = Math.min(effectiveRes, BASE_DISTRICT_RESOLUTION);
     const cacheKey = `${districtId}@${resValue}`;
-    const featureCollection = buildHexFeatureCollection(payload.cells || [], districtId);
+    const featureCollection = buildHexFeatureCollection(
+      payload.cells || [],
+      districtId,
+    );
     districtCellsCache.set(cacheKey, { featureCollection, meta: payload });
     return { payload, resValue, cacheKey, featureCollection };
   }
@@ -714,23 +1021,26 @@
   function updateOverlayLabels(features) {
     if (!labelOverlayEl) return;
     const seenIds = new Set();
-    features.forEach(feature => {
+    features.forEach((feature) => {
       const props = feature.properties || {};
       const id = props.id;
       if (id == null) return;
       seenIds.add(id);
       let el = overlayLabels.get(id);
       if (!el) {
-        el = document.createElement('div');
-        el.className = 'district-label';
+        el = document.createElement("div");
+        el.className = "district-label";
         overlayLabels.set(id, el);
         labelOverlayEl.appendChild(el);
       }
       const percent = featureProgressPercent(feature);
-      const text = percent != null ? `${props.name || id}\n${Math.round(percent)}%` : `${props.name || id}`;
+      const text =
+        percent != null
+          ? `${props.name || id}\n${Math.round(percent)}%`
+          : `${props.name || id}`;
       el.textContent = text;
       el.dataset.labelId = `${id}`;
-      el.dataset.progress = percent != null ? `${percent}` : '';
+      el.dataset.progress = percent != null ? `${percent}` : "";
     });
 
     overlayLabels.forEach((el, id) => {
@@ -747,13 +1057,13 @@
     const hideAll = zoom > 12.8;
     overlayLabels.forEach((el, id) => {
       if (hideAll) {
-        el.style.display = 'none';
+        el.style.display = "none";
         return;
       }
-      el.style.display = 'block';
+      el.style.display = "block";
       const feature = districtFeatureMap.get(id);
       if (!feature || !feature.geometry) {
-        el.style.display = 'none';
+        el.style.display = "none";
         return;
       }
       let center;
@@ -772,29 +1082,38 @@
     statusOverrideMessage = opts.temporary ? message : null;
     if (!statusEl) return;
     statusEl.textContent = message || DEFAULT_STATUS_TEXT;
-    statusEl.dataset.state = opts.state || '';
+    statusEl.dataset.state = opts.state || "";
   }
 
   setStatus(DEFAULT_STATUS_TEXT);
 
   if (noAuthMode || debugAuthMode) {
-    toggleFogBtn.style.display = 'inline-block';
+    toggleFogBtn.style.display = "inline-block";
   }
 
   const cloudTexture = FogModule.createCloudTexture(512, 512);
-  const cloudPattern = fogCtx.createPattern(cloudTexture, 'repeat');
+  const cloudPattern = fogCtx.createPattern(cloudTexture, "repeat");
 
   function drawFogLoop() {
     animationTime++;
-    FogModule.drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_CONFIG, DPR, cloudPattern);
+    FogModule.drawFog(
+      fogCtx,
+      map,
+      fogEnabled,
+      allKnownHexagons,
+      animationTime,
+      FOG_CONFIG,
+      DPR,
+      cloudPattern,
+    );
     renderDistrictLabels();
   }
 
   async function addVisitAt(lat, lng) {
-    const response = await fetch('/api/v1/visit', {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ lat, lon: lng })
+    const response = await fetch("/api/v1/visit", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ lat, lon: lng }),
     });
     if (!response.ok) {
       throw new Error(`Server error: ${response.statusText}`);
@@ -804,9 +1123,10 @@
       const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
       const hexId = h3.latLngToCell(lat, lng, h3Resolution);
       allKnownHexagons.add(hexId);
-      const total = (result.stats && typeof result.stats.total_circles === 'number')
-        ? result.stats.total_circles
-        : allKnownHexagons.size;
+      const total =
+        result.stats && typeof result.stats.total_circles === "number"
+          ? result.stats.total_circles
+          : allKnownHexagons.size;
       countEl.textContent = Number(total).toLocaleString();
       map.triggerRepaint();
     }
@@ -819,59 +1139,76 @@
     const targetHexId = h3.latLngToCell(lngLat.lat, lngLat.lng, h3Resolution);
 
     if (!allKnownHexagons.has(targetHexId)) {
-      console.log('Clicked on a cell that is not a known hexagon:', targetHexId);
+      console.log(
+        "Clicked on a cell that is not a known hexagon:",
+        targetHexId,
+      );
       return;
     }
 
-    const response = await fetch('/api/v1/circle', {
-      method: 'DELETE',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ geokey: targetHexId })
+    const response = await fetch("/api/v1/circle", {
+      method: "DELETE",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ geokey: targetHexId }),
     });
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`Delete failed with status ${response.status}: ${errText}`);
+      throw new Error(
+        `Delete failed with status ${response.status}: ${errText}`,
+      );
     }
     const res = await response.json();
     if (res.deleted > 0) {
       allKnownHexagons.delete(targetHexId);
       countEl.textContent = allKnownHexagons.size.toLocaleString();
       map.triggerRepaint();
-      console.log('Deleted hexagon:', targetHexId);
+      console.log("Deleted hexagon:", targetHexId);
     } else {
-      console.warn('Delete command sent, but server reported 0 deleted.', { geokey: targetHexId });
+      console.warn("Delete command sent, but server reported 0 deleted.", {
+        geokey: targetHexId,
+      });
     }
   }
 
   // --- Rest of the code ---
-  const loader = document.getElementById('loader');
+  const loader = document.getElementById("loader");
   async function updateHexagonsFromServer() {
     if (isFetching) return;
     isFetching = true;
-    const loaderTimeout = setTimeout(() => { if (loader) loader.style.display = 'flex'; }, 500);
+    const loaderTimeout = setTimeout(() => {
+      if (loader) loader.style.display = "flex";
+    }, 500);
     try {
       const bounds = map.getBounds();
-      const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(',');
-    const response = await fetch(`/api/v1/circles?bbox=${bbox}`, { headers: getAuthHeaders() });
-      if (!response.ok) throw new Error(`Network error: ${response.statusText}`);
+      const bbox = [
+        bounds.getWest(),
+        bounds.getSouth(),
+        bounds.getEast(),
+        bounds.getNorth(),
+      ].join(",");
+      const response = await fetch(`/api/v1/circles?bbox=${bbox}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!response.ok)
+        throw new Error(`Network error: ${response.statusText}`);
       const data = await response.json();
       let newHexagons = 0;
-      data.hexagons.forEach(hexId => {
+      data.hexagons.forEach((hexId) => {
         if (!allKnownHexagons.has(hexId)) {
           allKnownHexagons.add(hexId);
           newHexagons++;
         }
       });
       if (newHexagons > 0) {
-      countEl.textContent = allKnownHexagons.size.toLocaleString();
+        countEl.textContent = allKnownHexagons.size.toLocaleString();
       }
       map.triggerRepaint();
     } catch (error) {
-      console.error('[fog] Failed to fetch hexagons:', error);
+      console.error("[fog] Failed to fetch hexagons:", error);
     } finally {
       isFetching = false;
       clearTimeout(loaderTimeout);
-      if (loader) loader.style.display = 'none';
+      if (loader) loader.style.display = "none";
     }
   }
 
@@ -886,20 +1223,24 @@
     }
     const meta = cached?.meta;
     if (!meta || !Array.isArray(meta.cells) || meta.cells.length === 0) {
-      throw new Error('No cells cached for district');
+      throw new Error("No cells cached for district");
     }
 
     let revealCells = meta.cells;
     if (desiredRes < BASE_DISTRICT_RESOLUTION) {
-      const detailed = await fetchDistrictCellsRaw(districtId, BASE_DISTRICT_RESOLUTION);
-      revealCells = detailed.meta?.cells || detailed.payload?.cells || revealCells;
+      const detailed = await fetchDistrictCellsRaw(
+        districtId,
+        BASE_DISTRICT_RESOLUTION,
+      );
+      revealCells =
+        detailed.meta?.cells || detailed.payload?.cells || revealCells;
     }
 
     await revealDistrictViaVisits(revealCells);
 
     await Promise.all([
       updateHexagonsFromServer(),
-      fetchDistrictCells(districtId, desiredRes)
+      fetchDistrictCells(districtId, desiredRes),
     ]);
     refreshAdminLayers();
   }
@@ -912,40 +1253,43 @@
       if (allKnownHexagons.has(cell.h3)) continue;
       const [lat, lng] = h3.cellToLatLng(cell.h3);
       try {
-        const response = await fetch('/api/v1/visit', {
-          method: 'POST',
-          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ lat, lon: lng })
+        const response = await fetch("/api/v1/visit", {
+          method: "POST",
+          headers: getAuthHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ lat, lon: lng }),
         });
         enforceResolution(defaultVisitResolution);
         if (response.ok) {
           const result = await response.json();
           if (result.added > 0) {
             allKnownHexagons.add(cell.h3);
-            const total = (result.stats && typeof result.stats.total_circles === 'number')
-              ? result.stats.total_circles
-              : allKnownHexagons.size;
+            const total =
+              result.stats && typeof result.stats.total_circles === "number"
+                ? result.stats.total_circles
+                : allKnownHexagons.size;
             countEl.textContent = Number(total).toLocaleString();
             map.triggerRepaint();
           }
         }
       } catch (err) {
-        console.warn('[debug] reveal visit failed', { cell: cell.h3, err });
+        console.warn("[debug] reveal visit failed", { cell: cell.h3, err });
       }
     }
   }
 
-  map.on('load', () => {
-    const mapContainer = document.getElementById('map-container');
-    const controls = mapContainer.querySelector('.maplibregl-control-container');
+  map.on("load", () => {
+    const mapContainer = document.getElementById("map-container");
+    const controls = mapContainer.querySelector(
+      ".maplibregl-control-container",
+    );
     if (controls) {
       mapContainer.appendChild(controls);
     }
     const resizeObserver = new ResizeObserver(() => {
       const cssW = mapContainer.clientWidth;
       const cssH = mapContainer.clientHeight;
-      fogCanvas.style.width = cssW + 'px';
-      fogCanvas.style.height = cssH + 'px';
+      fogCanvas.style.width = cssW + "px";
+      fogCanvas.style.height = cssH + "px";
       fogCanvas.width = Math.max(1, Math.floor(cssW * DPR));
       fogCanvas.height = Math.max(1, Math.floor(cssH * DPR));
       fogCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -953,163 +1297,228 @@
     resizeObserver.observe(mapContainer);
     updateHexagonsFromServer();
     refreshAdminLayers();
-    try { geolocate.trigger(); } catch (e) { console.error(e); }
+    try {
+      geolocate.trigger();
+    } catch (e) {
+      console.error(e);
+    }
 
-    map.on('render', drawFogLoop);
+    map.on("render", drawFogLoop);
   });
 
-  map.on('moveend', () => {
+  map.on("moveend", () => {
     updateHexagonsFromServer();
     scheduleAdminRefresh();
   });
-  map.on('move', () => scheduleAdminRefresh(true));
-  map.on('zoomend', () => scheduleAdminRefresh());
+  map.on("move", () => scheduleAdminRefresh(true));
+  map.on("zoomend", () => scheduleAdminRefresh());
   // Mark that a move has occurred so the next click is ignored
-  map.on('movestart', () => { ignoreNextClick = true; });
-  map.on('moveend', () => { setTimeout(() => { ignoreNextClick = false; }, 120); });
-  
+  map.on("movestart", () => {
+    ignoreNextClick = true;
+  });
+  map.on("moveend", () => {
+    setTimeout(() => {
+      ignoreNextClick = false;
+    }, 120);
+  });
+
   let lastKnownPosition = null;
   const TARGET_GEO_ZOOM = 17;
   openBtn.disabled = true;
-  openBtn.textContent = 'Locating...';
+  openBtn.textContent = "Locating...";
 
-  geolocate.on('geolocate', (pos) => {
+  geolocate.on("geolocate", (pos) => {
     lastKnownPosition = pos.coords;
     const zoom = Math.max(map.getZoom(), TARGET_GEO_ZOOM);
     map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom });
     openBtn.disabled = false;
-    openBtn.textContent = 'Explore 50m Around';
+    openBtn.textContent = "Explore 50m Around";
   });
 
-  geolocate.on('error', () => {
+  geolocate.on("error", () => {
     if (noAuthMode) {
-      openBtn.textContent = 'Click map to add points';
+      openBtn.textContent = "Click map to add points";
       openBtn.disabled = false;
     } else {
-      openBtn.textContent = 'Geolocation failed';
+      openBtn.textContent = "Geolocation failed";
     }
   });
 
-  openBtn.addEventListener('click', async () => {
+  openBtn.addEventListener("click", async () => {
     if (!lastKnownPosition) {
-      if (noAuthMode) { alert('Click on the map to add points.'); }
-      else { alert('Location not determined.'); }
+      if (noAuthMode) {
+        alert("Click on the map to add points.");
+      } else {
+        alert("Location not determined.");
+      }
       return;
     }
     openBtn.disabled = true;
     try {
-      const response = await fetch('/api/v1/visit', {
-        method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ lat: lastKnownPosition.latitude, lon: lastKnownPosition.longitude })
+      const response = await fetch("/api/v1/visit", {
+        method: "POST",
+        headers: getAuthHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          lat: lastKnownPosition.latitude,
+          lon: lastKnownPosition.longitude,
+        }),
       });
       if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
       const result = await response.json();
       if (result.added > 0) {
-        const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
-        const hexId = h3.latLngToCell(lastKnownPosition.latitude, lastKnownPosition.longitude, h3Resolution);
+        const h3Resolution =
+          window.currentH3Resolution || defaultVisitResolution;
+        const hexId = h3.latLngToCell(
+          lastKnownPosition.latitude,
+          lastKnownPosition.longitude,
+          h3Resolution,
+        );
         allKnownHexagons.add(hexId);
-        countEl.textContent = (result.stats && typeof result.stats.total_circles === 'number') ? result.stats.total_circles.toLocaleString() : allKnownHexagons.size.toLocaleString();
+        countEl.textContent =
+          result.stats && typeof result.stats.total_circles === "number"
+            ? result.stats.total_circles.toLocaleString()
+            : allKnownHexagons.size.toLocaleString();
         map.triggerRepaint();
       }
     } catch (error) {
-      console.error('[visit] Failed to visit area:', error);
+      console.error("[visit] Failed to visit area:", error);
     } finally {
       openBtn.disabled = !lastKnownPosition;
     }
   });
 
-  toggleFogBtn.addEventListener('click', () => {
+  toggleFogBtn.addEventListener("click", () => {
     fogEnabled = !fogEnabled;
-    toggleFogBtn.textContent = fogEnabled ? 'Hide Fog' : 'Show Fog';
+    toggleFogBtn.textContent = fogEnabled ? "Hide Fog" : "Show Fog";
     map.triggerRepaint();
   });
 
   // Debug UI
-  const deleteModeBtn = document.getElementById('deleteModeBtn');
-  const clearDbBtn = document.getElementById('clearDbBtn');
-  const debugPanel = document.getElementById('debugPanel');
-  const revealDistrictBtn = document.getElementById('revealDistrictBtn');
+  const deleteModeBtn = document.getElementById("deleteModeBtn");
+  const clearDbBtn = document.getElementById("clearDbBtn");
+  const debugPanel = document.getElementById("debugPanel");
+  const revealDistrictBtn = document.getElementById("revealDistrictBtn");
   let deleteMode = false;
   let selectionEnabled = true;
 
   function setDeleteMode(on) {
     deleteMode = !!on;
     if (deleteModeBtn) {
-      deleteModeBtn.textContent = deleteMode ? 'Delete: On' : 'Delete: Off';
-      deleteModeBtn.style.background = deleteMode ? '#b91c1c' : '#ef4444';
+      deleteModeBtn.textContent = deleteMode ? "Delete: On" : "Delete: Off";
+      deleteModeBtn.style.background = deleteMode ? "#b91c1c" : "#ef4444";
     }
   }
 
   function setSelectionEnabled(on) {
     selectionEnabled = !!on;
-    const selectionToggleBtn = document.getElementById('selectionToggleBtn');
+    const selectionToggleBtn = document.getElementById("selectionToggleBtn");
     if (selectionToggleBtn) {
-      selectionToggleBtn.textContent = selectionEnabled ? 'Select: On' : 'Select: Off';
-      selectionToggleBtn.style.background = selectionEnabled ? '#0ea5e9' : '#475569';
+      selectionToggleBtn.textContent = selectionEnabled
+        ? "Select: On"
+        : "Select: Off";
+      selectionToggleBtn.style.background = selectionEnabled
+        ? "#0ea5e9"
+        : "#475569";
     }
   }
 
   if (noAuthMode || debugAuthMode) {
-    if (debugPanel) debugPanel.style.display = 'flex';
+    if (debugPanel) debugPanel.style.display = "flex";
   }
 
   if (deleteModeBtn) {
-    deleteModeBtn.addEventListener('click', () => setDeleteMode(!deleteMode));
+    deleteModeBtn.addEventListener("click", () => setDeleteMode(!deleteMode));
   }
- 
-  const selectionToggleBtn = document.getElementById('selectionToggleBtn');
+
+  const selectionToggleBtn = document.getElementById("selectionToggleBtn");
   setSelectionEnabled(true);
   if (selectionToggleBtn) {
-    selectionToggleBtn.addEventListener('click', () => {
+    selectionToggleBtn.addEventListener("click", () => {
       setSelectionEnabled(!selectionEnabled);
     });
   }
 
+  if (leaderboardBtn) {
+    leaderboardBtn.addEventListener("click", () => {
+      leaderboardLevelSelect.value = leaderboardState.level;
+      leaderboardPeriodSelect.value = leaderboardState.period;
+      showLeaderboard();
+    });
+  }
+
+  if (leaderboardCloseBtn) {
+    leaderboardCloseBtn.addEventListener("click", hideLeaderboard);
+  }
+
+  if (leaderboardOverlay) {
+    leaderboardOverlay.addEventListener("click", (event) => {
+      if (event.target === leaderboardOverlay) hideLeaderboard();
+    });
+  }
+
+  if (leaderboardLevelSelect) {
+    leaderboardLevelSelect.addEventListener(
+      "change",
+      handleLeaderboardLevelChange,
+    );
+  }
+
+  if (leaderboardPeriodSelect) {
+    leaderboardPeriodSelect.addEventListener(
+      "change",
+      handleLeaderboardPeriodChange,
+    );
+  }
+
+  document.addEventListener("keydown", handleLeaderboardKey);
+
   if (revealDistrictBtn) {
-    revealDistrictBtn.addEventListener('click', async () => {
+    revealDistrictBtn.addEventListener("click", async () => {
       if (!selectedDistrictId) {
-        alert('Select a district first.');
+        alert("Select a district first.");
         return;
       }
       revealDistrictBtn.disabled = true;
-      revealDistrictBtn.textContent = 'Revealing…';
+      revealDistrictBtn.textContent = "Revealing…";
       try {
         await revealEntireDistrict(selectedDistrictId);
       } catch (err) {
-        console.warn('[debug] reveal district failed', err);
-        alert('Failed to reveal district');
+        console.warn("[debug] reveal district failed", err);
+        alert("Failed to reveal district");
       } finally {
         revealDistrictBtn.disabled = false;
-        revealDistrictBtn.textContent = 'Reveal District';
+        revealDistrictBtn.textContent = "Reveal District";
       }
     });
   }
 
   if (clearDbBtn) {
-    clearDbBtn.addEventListener('click', async () => {
-      if (!confirm('Clear the entire database? This action is irreversible.')) return;
+    clearDbBtn.addEventListener("click", async () => {
+      if (!confirm("Clear the entire database? This action is irreversible."))
+        return;
       try {
-        const res = await fetch('/api/v1/dev/clear-db', { method: 'POST' });
-        if (!res.ok) throw new Error('clear-db failed');
+        const res = await fetch("/api/v1/dev/clear-db", { method: "POST" });
+        if (!res.ok) throw new Error("clear-db failed");
         const data = await res.json().catch(() => ({}));
         allKnownHexagons.clear();
-        countEl.textContent = '0';
+        countEl.textContent = "0";
         map.triggerRepaint();
-        alert(`DB cleared. circles=${data.cleared_circles ?? '?'}, users=${data.cleared_users ?? '?'}`);
+        alert(
+          `DB cleared. circles=${data.cleared_circles ?? "?"}, users=${data.cleared_users ?? "?"}`,
+        );
       } catch (e) {
-        alert('Error clearing database');
-        console.warn('[dev] clear-db error', e);
+        alert("Error clearing database");
+        console.warn("[dev] clear-db error", e);
       }
     });
   }
 
-  map.on('click', (e) => {
+  map.on("click", (e) => {
     if (ignoreNextClick) return;
 
     // First, try to detect district feature under cursor
     const districtFeatures = map.queryRenderedFeatures(e.point, {
-      layers: [ADMIN_LAYERS.districtHitArea]
+      layers: [ADMIN_LAYERS.districtHitArea],
     });
     if (districtFeatures && districtFeatures.length > 0) {
       if (selectionEnabled) {
@@ -1124,8 +1533,8 @@
         .then(() => {
           scheduleAdminRefresh();
         })
-        .catch(error => {
-          console.error('[visit] Failed to visit area:', error);
+        .catch((error) => {
+          console.error("[visit] Failed to visit area:", error);
         });
       return;
     }

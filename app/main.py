@@ -127,6 +127,8 @@ class ProgressBreakdown(BaseModel):
     visited_cells: int
     total_cells: int
     percent: float
+    percent_cells: float = 0.0
+    percent_weight: float = 0.0
     visited_weight: float = 0.0
     total_weight: float = 0.0
 
@@ -178,6 +180,23 @@ class StatsSummaryResponse(BaseModel):
     bottom_districts: List[DistrictSummaryEntry]
 
 
+class LeaderboardEntry(BaseModel):
+    rank: int
+    user_id: int
+    username: Optional[str]
+    visited_cells: int
+    visited_weight: float
+    percent_cells: float
+    percent_weight: float
+
+
+class LeaderboardResponse(BaseModel):
+    level: Literal["district", "okrug"]
+    period: Literal["week", "season"]
+    generated_at: datetime
+    entries: List[LeaderboardEntry]
+
+
 def _parse_bbox(bbox: str) -> Tuple[float, float, float, float]:
     try:
         min_lon_str, min_lat_str, max_lon_str, max_lat_str = bbox.split(",")
@@ -198,15 +217,21 @@ def _progress_from_counts(
     visited_weight: float = 0.0,
     total_weight: float = 0.0,
 ) -> ProgressBreakdown:
-    percent = 0.0
+    percent_cells = 0.0
+    percent_weight = 0.0
+
     if total_cells > 0:
-        percent = round((visited_cells / total_cells) * 100.0, 2)
-    elif total_weight > 0:
-        percent = round((visited_weight / total_weight) * 100.0, 2)
+        percent_cells = round((visited_cells / total_cells) * 100.0, 2)
+
+    if total_weight > 0:
+        percent_weight = round((visited_weight / total_weight) * 100.0, 2)
+
     return ProgressBreakdown(
         visited_cells=int(visited_cells),
         total_cells=int(total_cells),
-        percent=percent,
+        percent=percent_cells,
+        percent_cells=percent_cells,
+        percent_weight=percent_weight,
         visited_weight=float(visited_weight),
         total_weight=float(total_weight),
     )
@@ -891,6 +916,68 @@ async def get_stats_summary(user=Depends(get_current_user)):
         total=total_progress,
         okrugs=okrugs,
         bottom_districts=bottom_districts,
+    )
+
+
+@app.get("/api/v1/leaderboard", response_model=LeaderboardResponse)
+async def get_leaderboard(
+    level: Literal["district", "okrug"] = Query(
+        "district", description="Aggregation level"),
+    period: Literal["week", "season"] = Query(
+        "week", description="Leaderboard period"),
+    limit: int = Query(10, ge=1, le=100, description="Number of entries to return"),
+    user=Depends(get_current_user),
+):
+    _ = user  # currently unused but validates auth
+
+    conn = db_module.get_connection()
+    total_cells, total_weight = db_module.get_total_cells_and_weight(conn, level=level)
+
+    if total_cells <= 0 and total_weight <= 0:
+        return LeaderboardResponse(
+            level=level,
+            period=period,
+            generated_at=datetime.now(timezone.utc),
+            entries=[],
+        )
+
+    rows = db_module.fetch_leaderboard(
+        conn,
+        level=level,
+        period=period,
+        limit=limit,
+    )
+
+    entries: List[LeaderboardEntry] = []
+    for idx, row in enumerate(rows, start=1):
+        visited_cells = int(row["visited_cells"] or 0)
+        visited_weight = float(row["visited_weight"] or 0.0)
+
+        percent_cells = 0.0
+        if total_cells > 0:
+            percent_cells = round((visited_cells / total_cells) * 100.0, 2)
+
+        percent_weight = 0.0
+        if total_weight > 0:
+            percent_weight = round((visited_weight / total_weight) * 100.0, 2)
+
+        entries.append(
+            LeaderboardEntry(
+                rank=idx,
+                user_id=int(row["user_id"]),
+                username=row["username"],
+                visited_cells=visited_cells,
+                visited_weight=visited_weight,
+                percent_cells=percent_cells,
+                percent_weight=percent_weight,
+            )
+        )
+
+    return LeaderboardResponse(
+        level=level,
+        period=period,
+        generated_at=datetime.now(timezone.utc),
+        entries=entries,
     )
 
 
