@@ -11,7 +11,7 @@ DB_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "db.sqlite3"),
 )
 
-BASE_VISIT_RESOLUTION = 8
+BASE_VISIT_RESOLUTION = 9
 PRIMARY_COVERAGE_THRESHOLD = 0.5
 
 _CONNECTION: Optional[sqlite3.Connection] = None
@@ -266,7 +266,7 @@ def update_user_h3_resolution(
         VALUES (?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             h3_resolution = excluded.h3_resolution;
-        """
+        """,
         (user_id, h3_resolution),
     )
     conn.commit()

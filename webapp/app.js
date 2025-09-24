@@ -72,6 +72,7 @@
   let fogEnabled = true;
   let animationTime = 0;
   const defaultVisitResolution = baseVisitResolution || window.__CITY_FOG_BASE_RESOLUTION__ || 8;
+  const BASE_DISTRICT_RESOLUTION = defaultVisitResolution;
   window.currentH3Resolution = defaultVisitResolution;
   // Prevent accidental clicks after dragging/zooming the map (phantom circles)
   let ignoreNextClick = false;
@@ -85,6 +86,7 @@
   let selectedDistrictName = '';
   let selectedDistrictFeature = null;
   let selectedDistrictAbortController = null;
+  let selectedDistrictResView = null;
   const DEFAULT_STATUS_TEXT = 'Select a district';
   const districtFeatureMap = new Map();
   const okrugFeatureMap = new Map();
@@ -335,6 +337,43 @@
     return { type: 'FeatureCollection', features };
   }
 
+  function calculateFeatureAreaKm2(feature) {
+    if (!feature?.geometry) return null;
+    try {
+      const areaSqMeters = turf.area(feature);
+      if (typeof areaSqMeters !== 'number' || Number.isNaN(areaSqMeters)) {
+        return null;
+      }
+      return areaSqMeters / 1_000_000;
+    } catch (err) {
+      console.warn('[area] Failed to compute feature area', err);
+      return null;
+    }
+  }
+
+  function pickResByArea(areaKm2) {
+    if (typeof areaKm2 !== 'number' || Number.isNaN(areaKm2)) {
+      return BASE_DISTRICT_RESOLUTION;
+    }
+    if (areaKm2 >= 3) {
+      return Math.max(0, BASE_DISTRICT_RESOLUTION - 1);
+    }
+    return BASE_DISTRICT_RESOLUTION;
+  }
+
+  function getFeatureAreaKm2(feature) {
+    if (!feature) return null;
+    const stored = feature?.properties?.area_km2;
+    if (typeof stored === 'number' && !Number.isNaN(stored)) {
+      return stored;
+    }
+    const computed = calculateFeatureAreaKm2(feature);
+    if (feature?.properties) {
+      feature.properties.area_km2 = computed;
+    }
+    return computed;
+  }
+
   function mapDistrictApiFeature(raw) {
     if (!raw || !raw.geom) return null;
     const feature = {
@@ -404,15 +443,17 @@
           }
         });
 
-        const districtFeatures = [];
-        districtFeatureMap.clear();
-        districtData.forEach(raw => {
-          const feature = mapDistrictApiFeature(raw);
-          if (feature) {
-            districtFeatures.push(feature);
-            districtFeatureMap.set(raw.id, feature);
-          }
-        });
+    const districtFeatures = [];
+    districtFeatureMap.clear();
+    districtData.forEach(raw => {
+        const feature = mapDistrictApiFeature(raw);
+        if (feature) {
+          const areaKm2 = getFeatureAreaKm2(feature);
+          feature.properties.area_km2 = areaKm2;
+          districtFeatures.push(feature);
+          districtFeatureMap.set(raw.id, feature);
+        }
+      });
 
         const okrugSource = map.getSource(ADMIN_SOURCES.okrugs);
         if (okrugSource) {
@@ -501,7 +542,11 @@
     updateSelectedDistrictHighlight();
     updateStatusForSelection();
 
-    const cached = districtCellsCache.get(districtId);
+    const effectiveResView = selectedDistrictResView != null
+      ? selectedDistrictResView
+      : pickResByArea(getFeatureAreaKm2(selectedDistrictFeature));
+    const cacheKey = `${districtId}@${effectiveResView}`;
+    const cached = districtCellsCache.get(cacheKey);
     if (cached) {
       updateDistrictHexLayer(cached.featureCollection);
       if (cached.meta?.district?.progress) {
@@ -514,7 +559,24 @@
       return;
     }
 
-    fetchDistrictCells(districtId);
+    const areaKm2 = getFeatureAreaKm2(selectedDistrictFeature);
+    const desiredRes = pickResByArea(areaKm2);
+    selectedDistrictResView = desiredRes;
+    const targetCacheKey = `${districtId}@${desiredRes}`;
+    const cachedForRes = districtCellsCache.get(targetCacheKey);
+    if (cachedForRes) {
+      updateDistrictHexLayer(cachedForRes.featureCollection);
+      if (cachedForRes.meta?.district?.progress) {
+        const progress = cachedForRes.meta.district.progress;
+        selectedDistrictFeature.properties.progress_percent = progress.percent ?? selectedDistrictFeature.properties.progress_percent;
+        selectedDistrictFeature.properties.visited_cells = progress.visited_cells ?? selectedDistrictFeature.properties.visited_cells;
+        selectedDistrictFeature.properties.total_cells = progress.total_cells ?? selectedDistrictFeature.properties.total_cells;
+        updateStatusForSelection();
+      }
+      return;
+    }
+
+    fetchDistrictCells(districtId, desiredRes);
   }
 
   function clearDistrictSelection() {
@@ -527,15 +589,22 @@
     selectedDistrictId = null;
     selectedDistrictName = '';
     selectedDistrictFeature = null;
+    selectedDistrictResView = null;
     updateSelectedDistrictHighlight();
     updateDistrictHexLayer(emptyFeatureCollection);
     updateStatusForSelection();
     if (wasSelected && previousId != null) {
-      districtCellsCache.delete(previousId);
+      const deleteKeys = [];
+      districtCellsCache.forEach((_, key) => {
+        if (typeof key === 'string' && key.startsWith(`${previousId}@`)) {
+          deleteKeys.push(key);
+        }
+      });
+      deleteKeys.forEach(key => districtCellsCache.delete(key));
     }
   }
 
-  function fetchDistrictCells(districtId) {
+  function fetchDistrictCells(districtId, resView = null) {
     if (selectedDistrictAbortController) {
       selectedDistrictAbortController.abort();
     }
@@ -543,21 +612,11 @@
     const controller = new AbortController();
     selectedDistrictAbortController = controller;
 
-    fetch(`/api/v1/district/${districtId}/cells`, {
-      signal: controller.signal,
-      headers: getAuthHeaders({ Accept: 'application/json' })
-    })
-      .then(response => {
-        if (!response.ok) {
-          throw new Error(`Failed to fetch district cells: ${response.status}`);
-        }
-        return response.json();
-      })
-      .then(payload => {
+    fetchDistrictCellsRaw(districtId, resView, { signal: controller.signal })
+      .then(({ payload, resValue, featureCollection }) => {
         if (controller.signal.aborted) return;
-        const featureCollection = buildHexFeatureCollection(payload.cells || [], districtId);
-        districtCellsCache.set(districtId, { featureCollection, meta: payload });
         if (selectedDistrictId === districtId) {
+          selectedDistrictResView = resValue;
           if (payload?.district?.progress) {
             selectedDistrictFeature.properties.progress_percent = payload.district.progress.percent ?? selectedDistrictFeature.properties.progress_percent;
             selectedDistrictFeature.properties.visited_cells = payload.district.progress.visited_cells ?? selectedDistrictFeature.properties.visited_cells;
@@ -568,7 +627,8 @@
                 ...existingFeature.properties,
                 progress_percent: selectedDistrictFeature.properties.progress_percent,
                 visited_cells: selectedDistrictFeature.properties.visited_cells,
-                total_cells: selectedDistrictFeature.properties.total_cells
+                total_cells: selectedDistrictFeature.properties.total_cells,
+                area_km2: selectedDistrictFeature.properties.area_km2
               };
             }
           }
@@ -630,6 +690,25 @@
     const source = map.getSource(ADMIN_SOURCES.districtHex);
     if (!source) return;
     source.setData(featureCollection || emptyFeatureCollection);
+  }
+
+  async function fetchDistrictCellsRaw(districtId, resView = null, options = {}) {
+    const { signal } = options;
+    const resParam = typeof resView === 'number' ? `?res_view=${resView}` : '';
+    const response = await fetch(`/api/v1/district/${districtId}/cells${resParam}`, {
+      signal,
+      headers: getAuthHeaders({ Accept: 'application/json' })
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch district cells: ${response.status}`);
+    }
+    const payload = await response.json();
+    const effectiveRes = typeof payload?.resolution === 'number' ? payload.resolution : BASE_DISTRICT_RESOLUTION;
+    const resValue = Math.min(effectiveRes, BASE_DISTRICT_RESOLUTION);
+    const cacheKey = `${districtId}@${resValue}`;
+    const featureCollection = buildHexFeatureCollection(payload.cells || [], districtId);
+    districtCellsCache.set(cacheKey, { featureCollection, meta: payload });
+    return { payload, resValue, cacheKey, featureCollection };
   }
 
   function updateOverlayLabels(features) {
@@ -797,20 +876,30 @@
   }
 
   async function revealEntireDistrict(districtId) {
-    const cached = districtCellsCache.get(districtId);
+    const areaKm2 = getFeatureAreaKm2(selectedDistrictFeature);
+    const desiredRes = pickResByArea(areaKm2);
+    const cacheKey = `${districtId}@${desiredRes}`;
+    let cached = districtCellsCache.get(cacheKey);
     if (!cached) {
-      await fetchDistrictCells(districtId);
+      await fetchDistrictCells(districtId, desiredRes);
+      cached = districtCellsCache.get(cacheKey);
     }
-    const meta = districtCellsCache.get(districtId)?.meta;
+    const meta = cached?.meta;
     if (!meta || !Array.isArray(meta.cells) || meta.cells.length === 0) {
       throw new Error('No cells cached for district');
     }
 
-    await revealDistrictViaVisits(meta.cells);
+    let revealCells = meta.cells;
+    if (desiredRes < BASE_DISTRICT_RESOLUTION) {
+      const detailed = await fetchDistrictCellsRaw(districtId, BASE_DISTRICT_RESOLUTION);
+      revealCells = detailed.meta?.cells || detailed.payload?.cells || revealCells;
+    }
+
+    await revealDistrictViaVisits(revealCells);
 
     await Promise.all([
       updateHexagonsFromServer(),
-      fetchDistrictCells(districtId)
+      fetchDistrictCells(districtId, desiredRes)
     ]);
     refreshAdminLayers();
   }
