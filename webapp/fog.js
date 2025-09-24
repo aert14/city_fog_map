@@ -118,6 +118,7 @@ function createCloudTexture(width, height) {
 // Caches to reduce repeated H3 geometry computations
 const __boundaryCache = new Map(); // hexId -> [[lat,lng],...]
 const __centerCache = new Map();   // hexId -> [lat,lng]
+const __bboxCache = new Map();     // hexId -> {minLat,maxLat,minLng,maxLng}
 let __lastRenderMs = 0;            // throttle draw to ~30 FPS
 
 function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_CONFIG, DPR, cloudPattern) {
@@ -157,13 +158,72 @@ function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_C
     const paddingLat = (ne.lat - sw.lat) * 0.1;
     const paddingLng = (ne.lng - sw.lng) * 0.1;
 
+    const paddedBounds = {
+      minLat: Math.min(sw.lat, ne.lat) - paddingLat,
+      maxLat: Math.max(sw.lat, ne.lat) + paddingLat,
+      minLng: Math.min(sw.lng, ne.lng) - paddingLng,
+      maxLng: Math.max(sw.lng, ne.lng) + paddingLng,
+      crossesDateline: sw.lng > ne.lng
+    };
+
     const visibleHexagons = [];
     allKnownHexagons.forEach(hexId => {
       try {
         let center = __centerCache.get(hexId);
         if (!center) { center = h3.cellToLatLng(hexId); __centerCache.set(hexId, center); }
-        if (center[0] > sw.lat - paddingLat && center[0] < ne.lat + paddingLat &&
-            center[1] > sw.lng - paddingLng && center[1] < ne.lng + paddingLng) {
+        let boundary = __boundaryCache.get(hexId);
+        if (!boundary) { boundary = h3.cellToBoundary(hexId); __boundaryCache.set(hexId, boundary); }
+
+        let bbox = __bboxCache.get(hexId);
+        if (!bbox) {
+          let minLat = Infinity;
+          let maxLat = -Infinity;
+          let minLng = Infinity;
+          let maxLng = -Infinity;
+          const corrected = [];
+          let crossesDateLine = false;
+          for (let i = 0; i < boundary.length; i++) {
+            let [lat, lng] = boundary[i];
+            if (lat < minLat) minLat = lat;
+            if (lat > maxLat) maxLat = lat;
+            if (lng < minLng) minLng = lng;
+            if (lng > maxLng) maxLng = lng;
+            corrected.push([lat, lng]);
+          }
+
+          if (maxLng - minLng > 180) {
+            crossesDateLine = true;
+            minLng = Infinity;
+            maxLng = -Infinity;
+            for (let i = 0; i < corrected.length; i++) {
+              let lng = corrected[i][1];
+              if (lng < 0) lng += 360;
+              if (lng < minLng) minLng = lng;
+              if (lng > maxLng) maxLng = lng;
+            }
+          }
+
+          bbox = { minLat, maxLat, minLng, maxLng, crossesDateLine };
+          __bboxCache.set(hexId, bbox);
+        }
+
+        const outsideLat = bbox.maxLat < paddedBounds.minLat || bbox.minLat > paddedBounds.maxLat;
+        let outsideLng;
+        if (bbox.crossesDateLine) {
+          const minBoundLng = paddedBounds.minLng < 0 ? paddedBounds.minLng + 360 : paddedBounds.minLng;
+          const maxBoundLng = paddedBounds.maxLng < 0 ? paddedBounds.maxLng + 360 : paddedBounds.maxLng;
+          const intersectsWest = bbox.maxLng >= minBoundLng;
+          const intersectsEast = bbox.minLng <= maxBoundLng;
+          outsideLng = !(intersectsWest || intersectsEast);
+        } else if (paddedBounds.crossesDateline) {
+          const intersectsWest = bbox.maxLng >= paddedBounds.minLng;
+          const intersectsEast = bbox.minLng <= paddedBounds.maxLng;
+          outsideLng = !(intersectsWest || intersectsEast);
+        } else {
+          outsideLng = bbox.maxLng < paddedBounds.minLng || bbox.minLng > paddedBounds.maxLng;
+        }
+
+        if (!(outsideLat || outsideLng)) {
           visibleHexagons.push(hexId);
         }
       } catch (e) {}
@@ -197,7 +257,7 @@ function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_C
           const centerPixels = map.project([center[1], center[0]]);
           const sample = boundary[0] || center;
           const samplePixels = map.project([sample[1], sample[0]]);
-          const radius = Math.max(4, Math.hypot(samplePixels.x - centerPixels.x, samplePixels.y - centerPixels.y) * 1.1);
+          const radius = Math.max(4, Math.hypot(samplePixels.x - centerPixels.x, samplePixels.y - centerPixels.y) * 1.65);
 
           frameGeometries.set(hexId, { center, centerPixels, radius });
 

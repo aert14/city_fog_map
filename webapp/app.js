@@ -48,7 +48,7 @@
   // --- Map Initialization ---
   const map = new maplibregl.Map({
     container: 'map',
-    style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
+    style: 'https://api.maptiler.com/maps/pastel/style.json?key=TFV5uV6DVVucu16gTZdi',
     center: [37.6173, 55.7558],
     zoom: 12,
     maxBounds: [[36.0, 55.0], [39.0, 56.5]]
