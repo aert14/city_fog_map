@@ -54,7 +54,7 @@ function createCloudTexture(width, height) {
                const idx = (j * width + i) * 4;
 
                // --- Final Formula ---
-               const base_alpha = 0.88; // Almost solid clouds like in Civ5
+               const base_alpha = 0.995; // Near solid fog
 
                // Denser clouds - fewer gaps and more depth
                let density = smoothstep(0.12, 0.88, v_base);
@@ -107,6 +107,11 @@ function createCloudTexture(width, height) {
                g *= atmosphere_darkening;
                b *= atmosphere_darkening;
 
+              const whitenessBoost = 0.7;
+              r = r + (255 - r) * whitenessBoost;
+              g = g + (255 - g) * whitenessBoost;
+              b = b + (255 - b) * whitenessBoost;
+
               data[idx] = r; data[idx+1] = g; data[idx+2] = b;
               data[idx+3] = Math.floor(final_alpha * 255);
       }
@@ -146,8 +151,15 @@ function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_C
     patternMatrix.e = mapOffset.x; patternMatrix.f = mapOffset.y;
     cloudPattern.setTransform(patternMatrix);
 
+    fogCtx.save();
+    fogCtx.globalAlpha = 1;
     fogCtx.fillStyle = cloudPattern;
     fogCtx.fillRect(0, 0, width, height);
+    fogCtx.fillStyle = 'rgba(250, 252, 255, 0.85)';
+    fogCtx.fillRect(0, 0, width, height);
+    fogCtx.fillStyle = 'rgba(210, 220, 234, 0.35)';
+    fogCtx.fillRect(0, 0, width, height);
+    fogCtx.restore();
 
     if (allKnownHexagons.size === 0) return;
 

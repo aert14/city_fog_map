@@ -63,7 +63,10 @@
           statusEl.textContent = 'Проверяем подпись…';
           const res = await fetch('/api/auth', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-H3-Resolution': `${window.currentH3Resolution || ''}`,
+            },
             body: JSON.stringify({ initData }),
           });
 

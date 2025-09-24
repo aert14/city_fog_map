@@ -19,9 +19,9 @@
         <span id="status"></span>
         <span class="count-label">Explored: <span id="count">0</span></span>
         <div id="debugPanel" style="display: none;">
-          <label for="radiusSlider">Radius (m): <span id="radiusValue">50</span></label>
-          <input id="radiusSlider" type="range" min="10" max="200" step="5" value="50" />
           <button id="deleteModeBtn" class="btn">Delete: Off</button>
+          <button id="selectionToggleBtn" class="btn">Select: On</button>
+          <button id="revealDistrictBtn" class="btn">Reveal District</button>
           <button id="clearDbBtn" class="btn" title="Clear all data (dev)">Clear DB</button>
         </div>
       </div>
@@ -29,6 +29,7 @@
       <div id="map-container">
         <div id="map"></div>
         <canvas id="fog-canvas"></canvas>
+        <div id="label-overlay"></div>
         <div id="loader"><div class="spinner"></div></div>
       </div>
     </div>
@@ -36,6 +37,7 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
     <script src="/webapp/fog.js"></script>
     <script src="/webapp/app.js"></script>
   </body>
