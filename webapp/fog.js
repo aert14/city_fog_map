@@ -163,83 +163,59 @@ function drawFog(fogCtx, map, fogEnabled, allKnownHexagons, animationTime, FOG_C
 
     if (allKnownHexagons.size === 0) return;
 
-    // Filter hexagons to only those visible on screen (+padding)
+    // --- Optimized hexagon filtering ---
     const bounds = map.getBounds();
     const sw = bounds.getSouthWest();
     const ne = bounds.getNorthEast();
-    const paddingLat = (ne.lat - sw.lat) * 0.1;
-    const paddingLng = (ne.lng - sw.lng) * 0.1;
+    const h3Res = window.currentH3Resolution || 8;
 
-    const paddedBounds = {
-      minLat: Math.min(sw.lat, ne.lat) - paddingLat,
-      maxLat: Math.max(sw.lat, ne.lat) + paddingLat,
-      minLng: Math.min(sw.lng, ne.lng) - paddingLng,
-      maxLng: Math.max(sw.lng, ne.lng) + paddingLng,
-      crossesDateline: sw.lng > ne.lng
-    };
+    // Add some padding to the bounding box to reveal hexagons at the edges
+    const paddingLat = (ne.lat - sw.lat) * 0.15;
+    const paddingLng = (ne.lng - sw.lng) * 0.15;
 
     const visibleHexagons = [];
-    allKnownHexagons.forEach(hexId => {
-      try {
-        let center = __centerCache.get(hexId);
-        if (!center) { center = h3.cellToLatLng(hexId); __centerCache.set(hexId, center); }
-        let boundary = __boundaryCache.get(hexId);
-        if (!boundary) { boundary = h3.cellToBoundary(hexId); __boundaryCache.set(hexId, boundary); }
+    const crossesDateline = sw.lng > ne.lng;
 
-        let bbox = __bboxCache.get(hexId);
-        if (!bbox) {
-          let minLat = Infinity;
-          let maxLat = -Infinity;
-          let minLng = Infinity;
-          let maxLng = -Infinity;
-          const corrected = [];
-          let crossesDateLine = false;
-          for (let i = 0; i < boundary.length; i++) {
-            let [lat, lng] = boundary[i];
-            if (lat < minLat) minLat = lat;
-            if (lat > maxLat) maxLat = lat;
-            if (lng < minLng) minLng = lng;
-            if (lng > maxLng) maxLng = lng;
-            corrected.push([lat, lng]);
-          }
+    if (crossesDateline) {
+        // Handle dateline crossing by creating two polygons
+        const poly1 = [
+            [ne.lat + paddingLat, sw.lng - paddingLng],
+            [ne.lat + paddingLat, 180],
+            [sw.lat - paddingLat, 180],
+            [sw.lat - paddingLat, sw.lng - paddingLng],
+        ];
+        const poly2 = [
+            [ne.lat + paddingLat, -180],
+            [ne.lat + paddingLat, ne.lng + paddingLng],
+            [sw.lat - paddingLat, ne.lng + paddingLng],
+            [sw.lat - paddingLat, -180],
+        ];
 
-          if (maxLng - minLng > 180) {
-            crossesDateLine = true;
-            minLng = Infinity;
-            maxLng = -Infinity;
-            for (let i = 0; i < corrected.length; i++) {
-              let lng = corrected[i][1];
-              if (lng < 0) lng += 360;
-              if (lng < minLng) minLng = lng;
-              if (lng > maxLng) maxLng = lng;
+        const potentialHexes = new Set([
+            ...h3.polygonToCells(poly1, h3Res),
+            ...h3.polygonToCells(poly2, h3Res),
+        ]);
+
+        potentialHexes.forEach(hexId => {
+            if (allKnownHexagons.has(hexId)) {
+                visibleHexagons.push(hexId);
             }
-          }
+        });
+    } else {
+        const viewPolygon = [
+            [ne.lat + paddingLat, sw.lng - paddingLng], // Top-left
+            [ne.lat + paddingLat, ne.lng + paddingLng], // Top-right
+            [sw.lat - paddingLat, ne.lng + paddingLng], // Bottom-right
+            [sw.lat - paddingLat, sw.lng - paddingLng], // Bottom-left
+        ];
 
-          bbox = { minLat, maxLat, minLng, maxLng, crossesDateLine };
-          __bboxCache.set(hexId, bbox);
-        }
-
-        const outsideLat = bbox.maxLat < paddedBounds.minLat || bbox.minLat > paddedBounds.maxLat;
-        let outsideLng;
-        if (bbox.crossesDateLine) {
-          const minBoundLng = paddedBounds.minLng < 0 ? paddedBounds.minLng + 360 : paddedBounds.minLng;
-          const maxBoundLng = paddedBounds.maxLng < 0 ? paddedBounds.maxLng + 360 : paddedBounds.maxLng;
-          const intersectsWest = bbox.maxLng >= minBoundLng;
-          const intersectsEast = bbox.minLng <= maxBoundLng;
-          outsideLng = !(intersectsWest || intersectsEast);
-        } else if (paddedBounds.crossesDateline) {
-          const intersectsWest = bbox.maxLng >= paddedBounds.minLng;
-          const intersectsEast = bbox.minLng <= paddedBounds.maxLng;
-          outsideLng = !(intersectsWest || intersectsEast);
-        } else {
-          outsideLng = bbox.maxLng < paddedBounds.minLng || bbox.minLng > paddedBounds.maxLng;
-        }
-
-        if (!(outsideLat || outsideLng)) {
-          visibleHexagons.push(hexId);
-        }
-      } catch (e) {}
-    });
+        const potentialHexes = h3.polygonToCells(viewPolygon, h3Res);
+        potentialHexes.forEach(hexId => {
+            if (allKnownHexagons.has(hexId)) {
+                visibleHexagons.push(hexId);
+            }
+        });
+    }
 
     if (visibleHexagons.length === 0) return;
 
