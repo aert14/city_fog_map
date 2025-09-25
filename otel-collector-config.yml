@@ -11,8 +11,9 @@ processors:
 
 exporters:
   otlp:
-    endpoint: "tempo:4317"
-    insecure: true
+    endpoint: "tempo:9095"
+    tls:
+      insecure: true
 
 service:
   pipelines:

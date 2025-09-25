@@ -92,7 +92,7 @@ services:
       - geo-service
       - user-service
       - stats-worker
-      - rabbitmq-exporter
+      - rabbitmq
 
   grafana:
     image: grafana/grafana:10.2.2
@@ -105,14 +105,6 @@ services:
     depends_on:
       - prometheus
 
-  rabbitmq-exporter:
-    image: kbudde/rabbitmq-exporter:latest
-    ports:
-      - "9419:9419"
-    environment:
-      - RABBITMQ_URL=http://guest:guest@rabbitmq:15672
-    depends_on:
-      - rabbitmq
 
   loki:
     image: grafana/loki:2.9.2
@@ -143,9 +135,11 @@ services:
 
   tempo:
     image: grafana/tempo:latest
+    user: root
     ports:
       - "3200:3200"  # Tempo
     volumes:
+      - ./tempo.yml:/etc/tempo.yml
       - tempo_data:/tmp/tempo
     command: -config.file=/etc/tempo.yml
 
@@ -178,6 +172,7 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+      - "9419:15692"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     environment:

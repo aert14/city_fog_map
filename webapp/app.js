@@ -1025,10 +1025,32 @@
     toggleFogBtn.style.display = "inline-block";
   }
 
-  const cloudTexture = FogModule.createCloudTexture(512, 512);
-  const cloudPattern = fogCtx.createPattern(cloudTexture, "repeat");
+  let cloudPattern = null;
+
+  // Initialize texture worker
+  const textureWorker = new Worker('texture.worker.js');
+  textureWorker.postMessage({ width: 512, height: 512 });
+
+  textureWorker.onmessage = function(e) {
+    if (e.data.bitmap) {
+      // Create pattern from the generated ImageBitmap
+      cloudPattern = fogCtx.createPattern(e.data.bitmap, "repeat");
+      console.log('Cloud texture generated and pattern created');
+    } else if (e.data.imageData) {
+      // Fallback for environments without OffscreenCanvas support
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = 512;
+      tempCanvas.height = 512;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.putImageData(e.data.imageData, 0, 0);
+      cloudPattern = fogCtx.createPattern(tempCanvas, "repeat");
+      console.log('Cloud texture generated (fallback mode) and pattern created');
+    }
+  };
 
   function drawFogLoop() {
+    if (!cloudPattern) return; // Wait for texture to be ready
+
     animationTime++;
     FogModule.drawFog(
       fogCtx,
