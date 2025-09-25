@@ -331,6 +331,28 @@ def select_district_parent(conn: psycopg2.extensions.connection, district_id: in
         return int(parent) if parent is not None else None
 
 
+def record_visit_atomic_only(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    now_ts: Optional[int] = None,
+) -> bool:
+    """Record visit in user_visits_atomic table only. Returns True if INSERT succeeded (new visit)."""
+    ts = int(now_ts if now_ts is not None else time.time())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_visits_atomic(user_id, h3, ts)
+            VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+            """,
+            (user_id, h3_index, ts),
+        )
+        added = cur.rowcount > 0
+    conn.commit()
+    return added
+
+
 def record_visit_and_increment_stats(
     conn: psycopg2.extensions.connection,
     *,

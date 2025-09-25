@@ -2,48 +2,52 @@ SHELL := /bin/bash
 
 # Absolute project root
 PROJECT_ROOT := ~/city_fog_map
-VENV := $(PROJECT_ROOT)/.venv
 
-.PHONY: help venv backend backend-debug backend-wo-auth tunnel tunnel-status password kill
+.PHONY: help up down build logs tunnel tunnel-status password kill clean
 
 help:
 	@echo "Targets:"
-	@echo "  venv           - create venv and install requirements"
-	@echo "  backend        - run FastAPI (uvicorn) attached on :8000"
-	@echo "  backend-debug  - run backend with DEBUG_AUTH_MODE=1 (auth demo only)"
-	@echo "  tunnel         - run LocalTunnel attached to :8000 (use SUBDOMAIN=foo to request subdomain)"
+	@echo "  up             - start all services with docker-compose"
+	@echo "  down           - stop all services"
+	@echo "  build          - rebuild all services"
+	@echo "  logs           - show logs from all services"
+	@echo "  tunnel         - run LocalTunnel attached to :80 (default subdomain: aert0)"
+	@echo "                 use SUBDOMAIN=foo to request custom subdomain"
 	@echo "  tunnel-status  - check tunnel status and get URL"
 	@echo "  password       - print LocalTunnel password (public IP)"
-	@echo "  kill           - stop all project processes and clean temporary files"
+	@echo "  kill           - stop tunnel and clean temporary files"
+	@echo "  clean          - remove all containers and volumes"
 
-venv:
-	@test -d $(VENV) || python3 -m venv $(VENV)
-	@source $(VENV)/bin/activate && pip install -r $(PROJECT_ROOT)/requirements.txt
+up:
+	@echo "Starting all services..."
+	cd $(PROJECT_ROOT); docker-compose up -d
+	@echo "Services started. Web app available at http://localhost"
+	@echo "RabbitMQ Management: http://localhost:15672 (guest/guest)"
 
-backend: venv
-	@test -n "$$TELEGRAM_BOT_TOKEN" || (echo "TELEGRAM_BOT_TOKEN is required" && exit 1)
-	@echo "Running backend (uvicorn) on :8000 (attached)"
-	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
+down:
+	@echo "Stopping all services..."
+	cd $(PROJECT_ROOT); docker-compose down
 
-backend-debug: venv
-backend-wo-auth: venv
-	@test -n "$$TELEGRAM_BOT_TOKEN" || (echo "TELEGRAM_BOT_TOKEN is required" && exit 1)
-	@echo "Running backend with NO_AUTH_MODE=1 on :8000 (attached)"
-	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env NO_AUTH_MODE=1 TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
-	@echo "Running backend in DEBUG_AUTH_MODE=1 on :8000 (attached)"
-	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env DEBUG_AUTH_MODE=1 TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
+build:
+	@echo "Building all services..."
+	cd $(PROJECT_ROOT); docker-compose build --no-cache
+
+logs:
+	cd $(PROJECT_ROOT); docker-compose logs -f
 
 tunnel:
-	@pkill -f "localtunnel --port 8000" || true
+	@pkill -f "localtunnel --port 80" || true
 	@rm -f /tmp/lt.log /tmp/lt_url.txt
 	@command -v npx >/dev/null 2>&1 || (echo "npx is required. Install Node: sudo apt-get install -y nodejs npm OR use nvm" && exit 1)
-	@echo "Running localtunnel to :8000 (attached)"
+	@echo "Running localtunnel to :80 (attached)"
 	@if [ -n "$$SUBDOMAIN" ]; then \
 		echo "Requesting subdomain: $$SUBDOMAIN"; \
-		npx --yes localtunnel --port 8000 --local-host 127.0.0.1 -s "$$SUBDOMAIN" > /tmp/lt.log 2>&1 & \
+		SUBDOMAIN="$$SUBDOMAIN"; \
 	else \
-		npx --yes localtunnel --port 8000 --local-host 127.0.0.1 > /tmp/lt.log 2>&1 & \
-	fi
+		echo "Using default subdomain: aert0"; \
+		SUBDOMAIN="aert0"; \
+	fi; \
+	npx --yes localtunnel --port 80 --local-host 127.0.0.1 -s "$$SUBDOMAIN" > /tmp/lt.log 2>&1 &
 	@echo "Tunnel started in background. Use 'make tunnel-status' to check status."
 
 tunnel-status:
@@ -60,12 +64,16 @@ password:
 	@curl -s https://loca.lt/mytunnelpassword; echo
 
 kill:
-	@echo "Stopping all project processes..."
-	@pkill -f "uvicorn.*app.main:app" || true
-	@pkill -f "localtunnel.*--port 8000" || true
+	@echo "Stopping tunnel..."
+	@pkill -f "localtunnel.*--port 80" || true
 	@rm -f /tmp/lt.log /tmp/lt_url.txt
-	@echo "Checking if port 8000 is free..."
-	@lsof -i :8000 >/dev/null 2>&1 || echo "Port 8000 is free"
-	@echo "All processes stopped and temporary files cleaned."
+	@echo "Checking if port 80 is free..."
+	@lsof -i :80 >/dev/null 2>&1 || echo "Port 80 is free"
+	@echo "Tunnel stopped and temporary files cleaned."
 	@exit 0
+
+clean:
+	@echo "Removing all containers and volumes..."
+	cd $(PROJECT_ROOT); docker-compose down -v --remove-orphans
+	@echo "All containers and volumes removed."
 

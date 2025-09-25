@@ -18,8 +18,11 @@ from pydantic import BaseModel, Field, ValidationError
 import h3
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import db as db_module
-from . import cache
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+import db as db_module
+import cache
 from redis.asyncio import Redis
 
 
@@ -428,7 +431,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
 # Static frontend at /webapp
-webapp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp")
+webapp_dir = "/webapp"
 if not os.path.isdir(webapp_dir):
     os.makedirs(webapp_dir, exist_ok=True)
 class LongCacheStatic(StaticFiles):

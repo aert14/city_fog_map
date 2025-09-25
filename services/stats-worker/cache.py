@@ -2,6 +2,7 @@ import os
 import logging
 from typing import Optional
 from redis.asyncio import Redis
+import redis
 
 logger = logging.getLogger(__name__)
 
@@ -45,3 +46,16 @@ async def close_redis_pool() -> None:
 async def get_redis() -> Optional[Redis]:
     """Зависимость FastAPI для получения клиента Redis"""
     return redis_client
+
+
+def get_redis_sync() -> Optional[redis.Redis]:
+    """Возвращает синхронный клиент Redis для использования в синхронном коде"""
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        return None
+
+    try:
+        return redis.from_url(redis_url)
+    except Exception as e:
+        logger.error(f"Failed to create sync Redis client: {e}")
+        return None

@@ -1,10 +1,10 @@
 version: '3.8'
 
 services:
-  app:
-    build: .
-    ports:
-      - "8000:8000"
+  monolith:
+    build:
+      context: .
+      dockerfile: ./services/monolith/Dockerfile
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
@@ -15,6 +15,43 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+
+  visit-service:
+    build: ./services/visit-service
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - NO_AUTH_MODE=1
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+
+  stats-worker:
+    build: ./services/stats-worker
+    command: python worker.py
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - monolith
+      - visit-service
 
   db:
     image: postgis/postgis:16-3.4
@@ -40,6 +77,18 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes
 
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+
 volumes:
   postgres_data:
   redis_data:
+  rabbitmq_data:

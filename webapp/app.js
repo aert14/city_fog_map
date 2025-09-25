@@ -1051,20 +1051,18 @@
       throw new Error(`Server error: ${response.statusText}`);
     }
     const result = await response.json();
-    if (result.added > 0) {
-      const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
-      const hexId = h3.latLngToCell(lat, lng, h3Resolution);
-      if (!allKnownHexagons.has(hexId)) {
-        allKnownHexagons.add(hexId);
-        addToSpatialIndex(hexId);
-      }
-      const total =
-        result.stats && typeof result.stats.total_circles === "number"
-          ? result.stats.total_circles
-          : allKnownHexagons.size;
-      countEl.textContent = Number(total).toLocaleString();
+
+    // Extract h3_geokey from response and immediately update UI
+    const h3Geokey = result.h3_geokey;
+    if (h3Geokey && !allKnownHexagons.has(h3Geokey)) {
+      allKnownHexagons.add(h3Geokey);
+      addToSpatialIndex(h3Geokey);
       map.triggerRepaint();
     }
+
+    // Note: We don't update the count here since stats are updated asynchronously
+    // The count will be updated when stats are refreshed from the server
+
     return result;
   }
 
