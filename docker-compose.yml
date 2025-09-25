@@ -8,6 +8,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - NO_AUTH_MODE=1
       - REDIS_URL=redis://redis:6379/0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     depends_on:
       db:
         condition: service_healthy
@@ -21,6 +22,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - NO_AUTH_MODE=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     depends_on:
       db:
         condition: service_healthy
@@ -33,6 +35,7 @@ services:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - NO_AUTH_MODE=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     depends_on:
       db:
         condition: service_healthy
@@ -43,6 +46,7 @@ services:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - NO_AUTH_MODE=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     depends_on:
       db:
         condition: service_healthy
@@ -56,6 +60,7 @@ services:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - REDIS_URL=redis://redis:6379/0
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     depends_on:
       db:
         condition: service_healthy
@@ -75,6 +80,74 @@ services:
       - geo-service
       - user-service
       - visit-service
+
+  prometheus:
+    image: prom/prometheus:v2.48.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - visit-service
+      - geo-service
+      - user-service
+      - stats-worker
+      - rabbitmq-exporter
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  rabbitmq-exporter:
+    image: kbudde/rabbitmq-exporter:latest
+    ports:
+      - "9419:9419"
+    environment:
+      - RABBITMQ_URL=http://guest:guest@rabbitmq:15672
+    depends_on:
+      - rabbitmq
+
+  loki:
+    image: grafana/loki:2.9.2
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:2.9.2
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/promtail-config.yml
+    depends_on:
+      - loki
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+    volumes:
+      - ./otel-collector-config.yml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:latest
+    ports:
+      - "3200:3200"  # Tempo
+    volumes:
+      - tempo_data:/tmp/tempo
+    command: -config.file=/etc/tempo.yml
 
   db:
     image: postgis/postgis:16-3.4
@@ -115,3 +188,6 @@ volumes:
   postgres_data:
   redis_data:
   rabbitmq_data:
+  grafana_data:
+  loki_data:
+  tempo_data:

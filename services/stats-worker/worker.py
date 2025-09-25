@@ -13,19 +13,36 @@ import sys
 from typing import Dict, Any
 
 import pika
+from prometheus_client import Counter, start_http_server
+from pythonjsonlogger import jsonlogger
 
 import sys
 import os
 sys.path.append(os.path.dirname(__file__))
 import db as db_module
 import cache
+import tracing
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure JSON logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Remove any existing handlers
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# Create JSON formatter
+json_formatter = jsonlogger.JsonFormatter()
+
+# Create stream handler for stdout
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(json_formatter)
+
+# Add handler to logger
+logger.addHandler(stream_handler)
+
+# Setup OpenTelemetry tracing
+tracing.setup_tracing("stats-worker")
 
 # Environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -34,6 +51,10 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 # Constants
 VISITS_QUEUE = "visits_queue"
+
+# Prometheus metrics
+jobs_processed_total = Counter('jobs_processed_total', 'Total number of jobs processed')
+jobs_failed_total = Counter('jobs_failed_total', 'Total number of failed jobs')
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -108,6 +129,7 @@ def process_visit_message(message: Dict[str, Any]) -> bool:
 
         if success:
             logger.info(f"Successfully updated statistics for user {user_id}")
+            jobs_processed_total.inc()  # Increment processed jobs counter
 
             # Invalidate user's stats cache
             try:
@@ -120,12 +142,14 @@ def process_visit_message(message: Dict[str, Any]) -> bool:
                 logger.warning(f"Failed to invalidate cache: {e}")
         else:
             logger.error(f"Failed to update statistics for user {user_id}")
+            jobs_failed_total.inc()  # Increment failed jobs counter
             return False
 
         return True
 
     except Exception as e:
         logger.error(f"Error processing visit message: {e}", exc_info=True)
+        jobs_failed_total.inc()  # Increment failed jobs counter
         return False
 
 
@@ -159,6 +183,10 @@ def callback(ch, method, properties, body):
 def main():
     """Main worker loop"""
     logger.info("Starting Stats Worker...")
+
+    # Start Prometheus metrics server
+    start_http_server(8001)
+    logger.info("Prometheus metrics server started on port 8001")
 
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)

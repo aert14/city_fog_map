@@ -3,6 +3,7 @@ import json
 import hmac
 import hashlib
 import logging
+import sys
 import time
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -12,18 +13,37 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
+from pythonjsonlogger import jsonlogger
 
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import db as db_module
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Import tracing from project root
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+import tracing
+
+# Configure JSON logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Remove any existing handlers
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# Create JSON formatter
+json_formatter = jsonlogger.JsonFormatter()
+
+# Create stream handler for stdout
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(json_formatter)
+
+# Add handler to logger
+logger.addHandler(stream_handler)
+
+# Setup OpenTelemetry tracing
+tracing.setup_tracing("user-service")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_BOT_TOKEN:
@@ -150,6 +170,12 @@ def get_current_user(
 
 
 app = FastAPI(title="User Service API", version="0.1.0")
+
+# Add Prometheus metrics
+from prometheus_fastapi_instrumentator import Instrumentator
+instrumentator = Instrumentator()
+instrumentator.instrument(app)
+instrumentator.expose(app)
 
 # Add CORS middleware
 app.add_middleware(

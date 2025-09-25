@@ -2,21 +2,44 @@ import os
 import json
 import time
 import logging
+import sys
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 import h3
 import pika
+from pythonjsonlogger import jsonlogger
 
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import db as db_module
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Import tracing from project root
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+import tracing
+
+# Configure JSON logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Remove any existing handlers
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# Create JSON formatter
+json_formatter = jsonlogger.JsonFormatter()
+
+# Create stream handler for stdout
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(json_formatter)
+
+# Add handler to logger
+logger.addHandler(stream_handler)
+
+# Setup OpenTelemetry tracing
+tracing.setup_tracing("visit-service")
 
 # Environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -88,6 +111,10 @@ def get_user_from_request(request: Request) -> int:
 
 app = FastAPI(title="Visit Service API", version="0.1.0")
 
+# Add Prometheus metrics
+from prometheus_fastapi_instrumentator import Instrumentator
+
+Instrumentator().instrument(app).expose(app)
 
 @app.post("/api/v1/visit", response_model=VisitAcceptedResponse)
 async def visit_area(request: Request, body: VisitRequest):
