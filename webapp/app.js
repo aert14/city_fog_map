@@ -99,7 +99,6 @@
     baseVisitResolution || window.__CITY_FOG_BASE_RESOLUTION__ || 8;
   const BASE_DISTRICT_RESOLUTION = defaultVisitResolution;
   window.currentH3Resolution = defaultVisitResolution;
-  // Prevent accidental clicks after dragging/zooming the map (phantom circles)
   let ignoreNextClick = false;
   const emptyFeatureCollection = { type: "FeatureCollection", features: [] };
   const ADMIN_FETCH_DEBOUNCE_MS = 360;
@@ -117,8 +116,47 @@
   const okrugFeatureMap = new Map();
   const districtCellsCache = new Map();
   let statusOverrideMessage = null;
-  const labelOverlayEl = document.getElementById("label-overlay");
-  const overlayLabels = new Map();
+
+  // --- NEW: Spatial Index for Hexagons ---
+  const spatialIndex = new Map();
+  const GRID_SIZE = 0.25; // Size of the grid cell in degrees. Tune if needed.
+
+  function getGridKey(lat, lng) {
+    const gridX = Math.floor(lng / GRID_SIZE);
+    const gridY = Math.floor(lat / GRID_SIZE);
+    return `${gridX}_${gridY}`;
+  }
+
+  function addToSpatialIndex(hexId) {
+    if (!hexId) return;
+    try {
+      const [lat, lng] = h3.cellToLatLng(hexId);
+      const key = getGridKey(lat, lng);
+      if (!spatialIndex.has(key)) {
+        spatialIndex.set(key, new Set());
+      }
+      spatialIndex.get(key).add(hexId);
+    } catch (e) {
+      console.warn(`Failed to add hex ${hexId} to spatial index`, e);
+    }
+  }
+
+  function removeFromSpatialIndex(hexId) {
+    if (!hexId) return;
+    try {
+      const [lat, lng] = h3.cellToLatLng(hexId);
+      const key = getGridKey(lat, lng);
+      if (spatialIndex.has(key)) {
+        spatialIndex.get(key).delete(hexId);
+        if (spatialIndex.get(key).size === 0) {
+          spatialIndex.delete(key);
+        }
+      }
+    } catch (e) {
+      console.warn(`Failed to remove hex ${hexId} from spatial index`, e);
+    }
+  }
+  // --- END: Spatial Index ---
 
   const leaderboardState = {
     isOpen: false,
@@ -323,41 +361,29 @@
     }
   }
 
-  function featureProgressPercent(feature) {
-    const rawPercentCells = feature?.properties?.percent_cells;
-    if (typeof rawPercentCells === "number" && !Number.isNaN(rawPercentCells)) {
-      return rawPercentCells;
-    }
-    const percent = feature?.properties?.progress_percent;
-    return typeof percent === "number" && !Number.isNaN(percent)
-      ? percent
-      : null;
-  }
-
   function safeRound(value) {
     return Math.max(0, Math.round(value));
   }
 
-  function formatProgressPercent(percent) {
-    if (typeof percent !== "number" || Number.isNaN(percent)) return null;
-    return `${safeRound(percent)}%`;
-  }
-
   function formatProgressSuffix(feature) {
-    const cells = feature?.properties?.percent_cells;
-    const weight = feature?.properties?.percent_weight;
+    const props = feature?.properties;
+    if (!props) return null;
+
+    const cells = props.percent_cells;
+    const weight = props.percent_weight;
     const cellsLabel =
       typeof cells === "number" && !Number.isNaN(cells)
-        ? `${safeRound(cells)}% клеток`
+        ? `${safeRound(cells)}%`
         : null;
+
+    if (cellsLabel) return cellsLabel;
+
     const weightLabel =
       typeof weight === "number" && !Number.isNaN(weight)
-        ? `${safeRound(weight)}% веса`
+        ? `${safeRound(weight)}% weight`
         : null;
-    if (cellsLabel && weightLabel && weightLabel !== cellsLabel) {
-      return `${cellsLabel} • ${weightLabel}`;
-    }
-    return cellsLabel || weightLabel;
+
+    return weightLabel;
   }
 
   function ensureAdminSourcesAndLayers() {
@@ -430,16 +456,42 @@
       });
     }
 
+    // --- UPDATED: NATIVE MAPLIBRE LABELS ---
     if (!map.getLayer(ADMIN_LAYERS.districtLabels)) {
       map.addLayer({
         id: ADMIN_LAYERS.districtLabels,
         type: "symbol",
         source: ADMIN_SOURCES.districts,
+        minzoom: 11.5,
         layout: {
-          visibility: "none",
+          "visibility": "visible",
+          "text-field": [
+            "format",
+            ["get", "name"],
+            { "font-scale": 1.0, "text-font": ["literal", ["Inter Bold", "Arial Unicode MS Bold"]] },
+            "\n",
+            {},
+            [
+              "case",
+              ["has", "overlay_suffix"],
+              ["get", "overlay_suffix"],
+              "",
+            ],
+            { "font-scale": 0.85, "text-font": ["literal", ["Inter Regular", "Arial Unicode MS Regular"]] },
+          ],
+          "text-size": 13,
+          "text-allow-overlap": false,
+          "text-ignore-placement": false,
+        },
+        paint: {
+          "text-color": "#f8fafc",
+          "text-halo-color": "#1e293b",
+          "text-halo-width": 1.5,
+          "text-halo-blur": 1,
         },
       });
     }
+    // --- END UPDATED ---
 
     if (!map.getLayer(ADMIN_LAYERS.districtBorders)) {
       map.addLayer({
@@ -592,7 +644,6 @@
         name: raw.name,
         level: raw.level,
         parent_id: raw.parent_id,
-        progress_percent: percentCells,
         percent_cells: percentCells,
         percent_weight: percentWeight,
         visited_cells: raw.progress?.visited_cells ?? 0,
@@ -658,10 +709,6 @@
         okrugData.forEach((raw) => {
           const feature = mapDistrictApiFeature(raw);
           if (feature) {
-            const overlaySuffix = formatProgressSuffix(feature);
-            if (overlaySuffix) {
-              feature.properties.overlay_suffix = overlaySuffix;
-            }
             okrugFeatures.push(feature);
             okrugFeatureMap.set(raw.id, feature);
           }
@@ -672,12 +719,8 @@
         districtData.forEach((raw) => {
           const feature = mapDistrictApiFeature(raw);
           if (feature) {
-            const areaKm2 = getFeatureAreaKm2(feature);
-            feature.properties.area_km2 = areaKm2;
-            const overlaySuffix = formatProgressSuffix(feature);
-            if (overlaySuffix) {
-              feature.properties.overlay_suffix = overlaySuffix;
-            }
+            getFeatureAreaKm2(feature); // Pre-calculate area
+            feature.properties.overlay_suffix = formatProgressSuffix(feature);
             districtFeatures.push(feature);
             districtFeatureMap.set(raw.id, feature);
           }
@@ -692,7 +735,6 @@
         if (districtSource) {
           districtSource.setData(toFeatureCollection(districtFeatures));
         }
-        updateOverlayLabels(districtFeatures);
 
         if (selectedDistrictId != null) {
           const updatedFeature = districtFeatureMap.get(selectedDistrictId);
@@ -749,9 +791,7 @@
       if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
       return;
     }
-    const suffix =
-      formatProgressSuffix(selectedDistrictFeature) ||
-      formatProgressPercent(featureProgressPercent(selectedDistrictFeature));
+    const suffix = formatProgressSuffix(selectedDistrictFeature);
     const label = suffix
       ? `${selectedDistrictName} • ${suffix}`
       : selectedDistrictName;
@@ -788,25 +828,11 @@
       if (cached.meta?.district?.progress) {
         const progress = cached.meta.district.progress;
         const percentCells = progress.percent_cells ?? progress.percent;
-        selectedDistrictFeature.properties.progress_percent =
-          percentCells ?? selectedDistrictFeature.properties.progress_percent;
         selectedDistrictFeature.properties.percent_cells =
           percentCells ?? selectedDistrictFeature.properties.percent_cells;
         selectedDistrictFeature.properties.percent_weight =
           progress.percent_weight ??
           selectedDistrictFeature.properties.percent_weight;
-        selectedDistrictFeature.properties.visited_cells =
-          progress.visited_cells ??
-          selectedDistrictFeature.properties.visited_cells;
-        selectedDistrictFeature.properties.total_cells =
-          progress.total_cells ??
-          selectedDistrictFeature.properties.total_cells;
-        selectedDistrictFeature.properties.visited_weight =
-          progress.visited_weight ??
-          selectedDistrictFeature.properties.visited_weight;
-        selectedDistrictFeature.properties.total_weight =
-          progress.total_weight ??
-          selectedDistrictFeature.properties.total_weight;
         updateStatusForSelection();
       }
       return;
@@ -822,25 +848,11 @@
       if (cachedForRes.meta?.district?.progress) {
         const progress = cachedForRes.meta.district.progress;
         const percentCells = progress.percent_cells ?? progress.percent;
-        selectedDistrictFeature.properties.progress_percent =
-          percentCells ?? selectedDistrictFeature.properties.progress_percent;
         selectedDistrictFeature.properties.percent_cells =
           percentCells ?? selectedDistrictFeature.properties.percent_cells;
         selectedDistrictFeature.properties.percent_weight =
           progress.percent_weight ??
           selectedDistrictFeature.properties.percent_weight;
-        selectedDistrictFeature.properties.visited_cells =
-          progress.visited_cells ??
-          selectedDistrictFeature.properties.visited_cells;
-        selectedDistrictFeature.properties.total_cells =
-          progress.total_cells ??
-          selectedDistrictFeature.properties.total_cells;
-        selectedDistrictFeature.properties.visited_weight =
-          progress.visited_weight ??
-          selectedDistrictFeature.properties.visited_weight;
-        selectedDistrictFeature.properties.total_weight =
-          progress.total_weight ??
-          selectedDistrictFeature.properties.total_weight;
         updateStatusForSelection();
       }
       return;
@@ -888,39 +900,19 @@
         if (selectedDistrictId === districtId) {
           selectedDistrictResView = resValue;
           if (payload?.district?.progress) {
-            selectedDistrictFeature.properties.progress_percent =
-              payload.district.progress.percent_cells ??
-              payload.district.progress.percent ??
-              selectedDistrictFeature.properties.progress_percent;
             selectedDistrictFeature.properties.percent_cells =
               payload.district.progress.percent_cells ??
+              payload.district.progress.percent ??
               selectedDistrictFeature.properties.percent_cells;
             selectedDistrictFeature.properties.percent_weight =
               payload.district.progress.percent_weight ??
               selectedDistrictFeature.properties.percent_weight;
-            selectedDistrictFeature.properties.visited_cells =
-              payload.district.progress.visited_cells ??
-              selectedDistrictFeature.properties.visited_cells;
-            selectedDistrictFeature.properties.total_cells =
-              payload.district.progress.total_cells ??
-              selectedDistrictFeature.properties.total_cells;
-            selectedDistrictFeature.properties.visited_weight =
-              payload.district.progress.visited_weight ??
-              selectedDistrictFeature.properties.visited_weight;
-            selectedDistrictFeature.properties.total_weight =
-              payload.district.progress.total_weight ??
-              selectedDistrictFeature.properties.total_weight;
+            
             const existingFeature = districtFeatureMap.get(districtId);
             if (existingFeature) {
-              existingFeature.properties = {
-                ...existingFeature.properties,
-                progress_percent:
-                  selectedDistrictFeature.properties.progress_percent,
-                percent_cells: selectedDistrictFeature.properties.percent_cells,
-                visited_cells: selectedDistrictFeature.properties.visited_cells,
-                total_cells: selectedDistrictFeature.properties.total_cells,
-                area_km2: selectedDistrictFeature.properties.area_km2,
-              };
+                existingFeature.properties.percent_cells = selectedDistrictFeature.properties.percent_cells;
+                existingFeature.properties.percent_weight = selectedDistrictFeature.properties.percent_weight;
+                existingFeature.properties.overlay_suffix = formatProgressSuffix(existingFeature);
             }
           }
           updateDistrictHexLayer(featureCollection);
@@ -1018,66 +1010,6 @@
     return { payload, resValue, cacheKey, featureCollection };
   }
 
-  function updateOverlayLabels(features) {
-    if (!labelOverlayEl) return;
-    const seenIds = new Set();
-    features.forEach((feature) => {
-      const props = feature.properties || {};
-      const id = props.id;
-      if (id == null) return;
-      seenIds.add(id);
-      let el = overlayLabels.get(id);
-      if (!el) {
-        el = document.createElement("div");
-        el.className = "district-label";
-        overlayLabels.set(id, el);
-        labelOverlayEl.appendChild(el);
-      }
-      const percent = featureProgressPercent(feature);
-      const text =
-        percent != null
-          ? `${props.name || id}\n${Math.round(percent)}%`
-          : `${props.name || id}`;
-      el.textContent = text;
-      el.dataset.labelId = `${id}`;
-      el.dataset.progress = percent != null ? `${percent}` : "";
-    });
-
-    overlayLabels.forEach((el, id) => {
-      if (!seenIds.has(id)) {
-        el.remove();
-        overlayLabels.delete(id);
-      }
-    });
-  }
-
-  function renderDistrictLabels() {
-    if (!labelOverlayEl || overlayLabels.size === 0) return;
-    const zoom = map.getZoom();
-    const hideAll = zoom > 12.8;
-    overlayLabels.forEach((el, id) => {
-      if (hideAll) {
-        el.style.display = "none";
-        return;
-      }
-      el.style.display = "block";
-      const feature = districtFeatureMap.get(id);
-      if (!feature || !feature.geometry) {
-        el.style.display = "none";
-        return;
-      }
-      let center;
-      try {
-        center = turf.center(feature).geometry.coordinates;
-      } catch (_) {
-        const bbox = turf.bbox(feature);
-        center = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
-      }
-      const point = map.project(center);
-      el.style.transform = `translate(-50%, -50%) translate(${point.x}px, ${point.y}px)`;
-    });
-  }
-
   function setStatus(message, opts = {}) {
     statusOverrideMessage = opts.temporary ? message : null;
     if (!statusEl) return;
@@ -1100,13 +1032,13 @@
       fogCtx,
       map,
       fogEnabled,
-      allKnownHexagons,
+      spatialIndex, // Pass spatial index instead of all hexagons
       animationTime,
       FOG_CONFIG,
       DPR,
       cloudPattern,
+      GRID_SIZE // Pass grid size to the module
     );
-    renderDistrictLabels();
   }
 
   async function addVisitAt(lat, lng) {
@@ -1122,7 +1054,10 @@
     if (result.added > 0) {
       const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
       const hexId = h3.latLngToCell(lat, lng, h3Resolution);
-      allKnownHexagons.add(hexId);
+      if (!allKnownHexagons.has(hexId)) {
+        allKnownHexagons.add(hexId);
+        addToSpatialIndex(hexId);
+      }
       const total =
         result.stats && typeof result.stats.total_circles === "number"
           ? result.stats.total_circles
@@ -1160,6 +1095,7 @@
     const res = await response.json();
     if (res.deleted > 0) {
       allKnownHexagons.delete(targetHexId);
+      removeFromSpatialIndex(targetHexId);
       countEl.textContent = allKnownHexagons.size.toLocaleString();
       map.triggerRepaint();
       console.log("Deleted hexagon:", targetHexId);
@@ -1196,6 +1132,7 @@
       data.hexagons.forEach((hexId) => {
         if (!allKnownHexagons.has(hexId)) {
           allKnownHexagons.add(hexId);
+          addToSpatialIndex(hexId);
           newHexagons++;
         }
       });
@@ -1258,11 +1195,11 @@
           headers: getAuthHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ lat, lon: lng }),
         });
-        enforceResolution(defaultVisitResolution);
         if (response.ok) {
           const result = await response.json();
           if (result.added > 0) {
             allKnownHexagons.add(cell.h3);
+            addToSpatialIndex(cell.h3);
             const total =
               result.stats && typeof result.stats.total_circles === "number"
                 ? result.stats.total_circles
@@ -1312,7 +1249,6 @@
   });
   map.on("move", () => scheduleAdminRefresh(true));
   map.on("zoomend", () => scheduleAdminRefresh());
-  // Mark that a move has occurred so the next click is ignored
   map.on("movestart", () => {
     ignoreNextClick = true;
   });
@@ -1373,7 +1309,10 @@
           lastKnownPosition.longitude,
           h3Resolution,
         );
-        allKnownHexagons.add(hexId);
+        if(!allKnownHexagons.has(hexId)) {
+            allKnownHexagons.add(hexId);
+            addToSpatialIndex(hexId);
+        }
         countEl.textContent =
           result.stats && typeof result.stats.total_circles === "number"
             ? result.stats.total_circles.toLocaleString()
@@ -1501,6 +1440,7 @@
         if (!res.ok) throw new Error("clear-db failed");
         const data = await res.json().catch(() => ({}));
         allKnownHexagons.clear();
+        spatialIndex.clear(); // Clear the index too
         countEl.textContent = "0";
         map.triggerRepaint();
         alert(
@@ -1516,7 +1456,6 @@
   map.on("click", (e) => {
     if (ignoreNextClick) return;
 
-    // First, try to detect district feature under cursor
     const districtFeatures = map.queryRenderedFeatures(e.point, {
       layers: [ADMIN_LAYERS.districtHitArea],
     });
