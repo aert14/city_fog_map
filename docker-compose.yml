@@ -9,9 +9,12 @@ services:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - NO_AUTH_MODE=1
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
 
   db:
     image: postgis/postgis:16-3.4
@@ -29,5 +32,14 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
 volumes:
   postgres_data:
+  redis_data:

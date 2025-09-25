@@ -1,0 +1,5304 @@
+app/db.py:
+import os
+import sqlite3
+import time
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import h3
+
+
+DB_PATH = os.getenv(
+    "DB_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "db.sqlite3"),
+)
+
+BASE_VISIT_RESOLUTION = 9
+PRIMARY_COVERAGE_THRESHOLD = 0.5
+
+_CONNECTION: Optional[sqlite3.Connection] = None
+
+
+def get_connection() -> sqlite3.Connection:
+    global _CONNECTION
+    if _CONNECTION is None:
+        _CONNECTION = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _CONNECTION.row_factory = sqlite3.Row
+        _CONNECTION.execute("PRAGMA journal_mode=WAL;")
+        _CONNECTION.execute("PRAGMA synchronous=NORMAL;")
+    return _CONNECTION
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id INTEGER NOT NULL UNIQUE,
+            username TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS districts (
+            id INTEGER PRIMARY KEY,
+            level TEXT CHECK(level IN ('okrug', 'district')) NOT NULL,
+            name_ru TEXT NOT NULL,
+            parent_id INTEGER,
+            geom_geojson TEXT NOT NULL,
+            bbox_min_lon REAL,
+            bbox_min_lat REAL,
+            bbox_max_lon REAL,
+            bbox_max_lat REAL,
+            total_cells INTEGER DEFAULT 0,
+            total_weight REAL DEFAULT 0.0,
+            FOREIGN KEY (parent_id) REFERENCES districts(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS district_cells (
+            district_id INTEGER NOT NULL,
+            h3 TEXT NOT NULL,
+            coverage REAL NOT NULL,
+            PRIMARY KEY (district_id, h3),
+            FOREIGN KEY (district_id) REFERENCES districts(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_districts_level ON districts(level);
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_districts_parent ON districts(parent_id);
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_district_cells_h3 ON district_cells(h3);
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS circles (
+            user_id INTEGER NOT NULL,
+            geokey TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, geokey),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            h3_resolution INTEGER NOT NULL DEFAULT 11,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_visits_atomic (
+            user_id INTEGER NOT NULL,
+            h3 TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            PRIMARY KEY (user_id, h3),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_district_stats (
+            user_id INTEGER NOT NULL,
+            district_id INTEGER NOT NULL,
+            visited_cells INTEGER NOT NULL DEFAULT 0,
+            visited_weight REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (user_id, district_id),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (district_id) REFERENCES districts(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_okrug_stats (
+            user_id INTEGER NOT NULL,
+            okrug_id INTEGER NOT NULL,
+            visited_cells INTEGER NOT NULL DEFAULT 0,
+            visited_weight REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (user_id, okrug_id),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (okrug_id) REFERENCES districts(id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_h3 ON user_visits_atomic(h3);
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_user ON user_visits_atomic(user_id);
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_district_stats_user ON user_district_stats(user_id);
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_okrug_stats_user ON user_okrug_stats(user_id);
+        """
+    )
+    conn.commit()
+
+
+def ensure_user(conn: sqlite3.Connection, tg_id: int, username: Optional[str]) -> int:
+    cur = conn.execute("SELECT id FROM users WHERE tg_id = ?", (tg_id,))
+    row = cur.fetchone()
+    if row:
+        user_id = int(row[0])
+        # Update username opportunistically
+        if username:
+            conn.execute("UPDATE users SET username = ? WHERE id = ?", (username, user_id))
+            conn.commit()
+        return user_id
+
+    # Create new user
+    cur = conn.execute(
+        "INSERT INTO users (tg_id, username) VALUES (?, ?)", (tg_id, username)
+    )
+    user_id = int(cur.lastrowid)
+
+    # Create default settings for the new user
+    conn.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+
+    return user_id
+
+
+def insert_circle_if_new(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    geokey: str,
+    lat: float,
+    lon: float,
+) -> bool:
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO circles (user_id, geokey, lat, lon)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, geokey, float(lat), float(lon)),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def count_circles(conn: sqlite3.Connection, *, user_id: int) -> int:
+    cur = conn.execute("SELECT COUNT(*) FROM circles WHERE user_id = ?", (user_id,))
+    return int(cur.fetchone()[0])
+
+
+def select_circles_in_bbox(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+) -> List[Tuple[float, float, str]]:
+    cur = conn.execute(
+        """
+        SELECT lat, lon, geokey
+        FROM circles
+        WHERE user_id = ?
+          AND lat BETWEEN ? AND ?
+          AND lon BETWEEN ? AND ?
+        ORDER BY created_at DESC
+        LIMIT 10000
+        """,
+        (user_id, min_lat, max_lat, min_lon, max_lon),
+    )
+    return [(float(r[0]), float(r[1]), str(r[2])) for r in cur.fetchall()]
+
+
+
+def delete_circle_by_geokey(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    geokey: str,
+) -> int:
+    """Deletes a circle by its geokey for a specific user."""
+    cur = conn.execute(
+        "DELETE FROM circles WHERE user_id = ? AND geokey = ?",
+        (user_id, geokey),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def update_user_h3_resolution(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    h3_resolution: int,
+) -> int:
+    """Update a user's H3 resolution in the user_settings table."""
+    cur = conn.execute(
+        """
+        INSERT INTO user_settings (user_id, h3_resolution)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            h3_resolution = excluded.h3_resolution;
+        """,
+        (user_id, h3_resolution),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def get_user_h3_resolution(conn: sqlite3.Connection, user_id: int) -> int:
+    """Get the H3 resolution for a user from user_settings."""
+    cur = conn.execute(
+        "SELECT h3_resolution FROM user_settings WHERE user_id = ?", (user_id,)
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row[0])
+    # Fallback to default matches BASE_VISIT_RESOLUTION
+    return BASE_VISIT_RESOLUTION
+
+
+def clear_user_circles(conn: sqlite3.Connection, user_id: int) -> int:
+    """Clear all circles for a user (used when H3 resolution changes)"""
+    cur = conn.execute("DELETE FROM circles WHERE user_id = ?", (user_id,))
+    conn.commit()
+    return cur.rowcount
+
+
+def clear_all(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Delete all rows from circles and users tables.
+
+    Returns:
+        (deleted_circles, deleted_users)
+    """
+    cur_c = conn.execute("SELECT COUNT(*) FROM circles")
+    cur_u = conn.execute("SELECT COUNT(*) FROM users")
+    count_circles = int(cur_c.fetchone()[0])
+    count_users = int(cur_u.fetchone()[0])
+
+    conn.execute("DELETE FROM circles")
+    conn.execute("DELETE FROM users")
+    conn.commit()
+    return count_circles, count_users
+
+
+def count_user_visited_hexes(conn: sqlite3.Connection, user_id: int) -> int:
+    cur = conn.execute(
+        "SELECT COUNT(*) FROM user_visits_atomic WHERE user_id = ?",
+        (user_id,),
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def select_district_for_cell(conn: sqlite3.Connection, h3_index: str) -> Optional[Tuple[int, float]]:
+    cur = conn.execute(
+        """
+        SELECT district_id, coverage
+        FROM district_cells
+        WHERE h3 = ?
+        ORDER BY coverage DESC
+        LIMIT 1
+        """,
+        (h3_index,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return int(row[0]), float(row[1])
+
+
+def select_district_parent(conn: sqlite3.Connection, district_id: int) -> Optional[int]:
+    cur = conn.execute(
+        "SELECT parent_id FROM districts WHERE id = ?",
+        (district_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    parent = row[0]
+    return int(parent) if parent is not None else None
+
+
+def record_visit_and_increment_stats(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    district_id: int,
+    coverage: float,
+    okrug_id: Optional[int],
+    now_ts: Optional[int] = None,
+) -> bool:
+    ts = int(now_ts if now_ts is not None else time.time())
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO user_visits_atomic(user_id, h3, ts)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, h3_index, ts),
+    )
+    added = cur.rowcount > 0
+    if not added:
+        return False
+
+    increment_cell = 1 if coverage >= PRIMARY_COVERAGE_THRESHOLD else 0
+
+    _update_statistic(
+        conn,
+        table="user_district_stats",
+        key_field="district_id",
+        user_id=user_id,
+        region_id=district_id,
+        increment_cell=increment_cell,
+        coverage=coverage,
+    )
+
+    if okrug_id is not None:
+        _update_statistic(
+            conn,
+            table="user_okrug_stats",
+            key_field="okrug_id",
+            user_id=user_id,
+            region_id=okrug_id,
+            increment_cell=increment_cell,
+            coverage=coverage,
+        )
+
+    conn.commit()
+    return True
+
+
+def _update_statistic(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    key_field: str,
+    user_id: int,
+    region_id: int,
+    increment_cell: int,
+    coverage: float,
+) -> None:
+    conn.execute(
+        f"""
+        INSERT INTO {table} (user_id, {key_field}, visited_cells, visited_weight)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, {key_field}) DO UPDATE SET
+            visited_cells = visited_cells + ?,
+            visited_weight = visited_weight + ?
+        """,
+        (user_id, region_id, increment_cell, coverage, increment_cell, coverage),
+    )
+
+
+def fetch_user_stats(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    district_id: Optional[int],
+    okrug_id: Optional[int],
+) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {
+        "total_circles": count_user_visited_hexes(conn, user_id),
+        "district": None,
+        "okrug": None,
+    }
+    if district_id is not None:
+        cur = conn.execute(
+            """
+            SELECT visited_cells, visited_weight
+            FROM user_district_stats
+            WHERE user_id = ? AND district_id = ?
+            """,
+            (user_id, district_id),
+        )
+        row = cur.fetchone()
+        if row:
+            stats["district"] = {
+                "id": district_id,
+                "visited_cells": int(row[0]),
+                "visited_weight": float(row[1]),
+            }
+    if okrug_id is not None:
+        cur = conn.execute(
+            """
+            SELECT visited_cells, visited_weight
+            FROM user_okrug_stats
+            WHERE user_id = ? AND okrug_id = ?
+            """,
+            (user_id, okrug_id),
+        )
+        row = cur.fetchone()
+        if row:
+            stats["okrug"] = {
+                "id": okrug_id,
+                "visited_cells": int(row[0]),
+                "visited_weight": float(row[1]),
+            }
+    return stats
+
+
+def select_user_hexes(conn: sqlite3.Connection, user_id: int) -> List[str]:
+    cur = conn.execute(
+        "SELECT h3 FROM user_visits_atomic WHERE user_id = ?",
+        (user_id,),
+    )
+    return [str(row[0]) for row in cur.fetchall()]
+
+
+def fetch_districts_in_bbox(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    level: str,
+) -> List[sqlite3.Row]:
+    conn.row_factory = sqlite3.Row
+    if level not in {"district", "okrug"}:
+        raise ValueError("Unsupported level")
+
+    stats_join = (
+        "LEFT JOIN user_district_stats AS s ON s.district_id = d.id AND s.user_id = ?"
+        if level == "district"
+        else "LEFT JOIN user_okrug_stats AS s ON s.okrug_id = d.id AND s.user_id = ?"
+    )
+
+    total_cells_expr = "d.total_cells"
+    total_weight_expr = "d.total_weight"
+    additional_join = ""
+
+    if level == "okrug":
+        total_cells_expr = "COALESCE(child_totals.total_cells, d.total_cells, 0)"
+        total_weight_expr = "COALESCE(child_totals.total_weight, d.total_weight, 0.0)"
+        additional_join = (
+            "LEFT JOIN (\n"
+            "    SELECT parent_id AS okrug_id,\n"
+            "           SUM(total_cells) AS total_cells,\n"
+            "           SUM(total_weight) AS total_weight\n"
+            "    FROM districts\n"
+            "    WHERE level = 'district'\n"
+            "    GROUP BY parent_id\n"
+            ") AS child_totals ON child_totals.okrug_id = d.id"
+        )
+        stats_join = (
+            "LEFT JOIN (\n"
+            "    SELECT\n"
+            "        child.parent_id AS okrug_id,\n"
+            "        COALESCE(SUM(uds.visited_cells), 0) AS visited_cells,\n"
+            "        COALESCE(SUM(uds.visited_weight), 0.0) AS visited_weight\n"
+            "    FROM districts AS child\n"
+            "    LEFT JOIN user_district_stats AS uds\n"
+            "        ON uds.district_id = child.id AND uds.user_id = ?\n"
+            "    WHERE child.level = 'district' AND child.parent_id IS NOT NULL\n"
+            "    GROUP BY child.parent_id\n"
+            ") AS s ON s.okrug_id = d.id"
+        )
+    else:
+        stats_join = "LEFT JOIN user_district_stats AS s ON s.district_id = d.id AND s.user_id = ?"
+
+    joins_sql = "\n        ".join(part for part in [additional_join, stats_join] if part)
+
+    sql = f"""
+        SELECT
+            d.id,
+            d.level,
+            d.name_ru,
+            d.parent_id,
+            d.geom_geojson,
+            d.bbox_min_lon,
+            d.bbox_min_lat,
+            d.bbox_max_lon,
+            d.bbox_max_lat,
+            {total_cells_expr} AS total_cells,
+            {total_weight_expr} AS total_weight,
+            COALESCE(s.visited_cells, 0) AS user_visited_cells,
+            COALESCE(s.visited_weight, 0.0) AS user_visited_weight
+        FROM districts AS d
+        {joins_sql}
+        WHERE d.level = ?
+          AND (d.bbox_max_lon IS NULL OR d.bbox_max_lon >= ?)
+          AND (d.bbox_min_lon IS NULL OR d.bbox_min_lon <= ?)
+          AND (d.bbox_max_lat IS NULL OR d.bbox_max_lat >= ?)
+          AND (d.bbox_min_lat IS NULL OR d.bbox_min_lat <= ?)
+        ORDER BY d.name_ru
+    """
+
+    params: List[Any]
+    if level == "okrug":
+        params = [user_id, level, min_lon, max_lon, min_lat, max_lat]
+    else:
+        params = [user_id, level, min_lon, max_lon, min_lat, max_lat]
+    cur = conn.execute(sql, params)
+    return cur.fetchall()
+
+
+def fetch_districts_by_ids(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    district_ids: Iterable[int],
+) -> List[sqlite3.Row]:
+    ids_list = list(district_ids)
+    if not ids_list:
+        return []
+
+    placeholders = ",".join(["?"] * len(ids_list))
+    sql = f"""
+        SELECT
+            d.id,
+            d.level,
+            d.name_ru,
+            d.parent_id,
+            d.geom_geojson,
+            d.bbox_min_lon,
+            d.bbox_min_lat,
+            d.bbox_max_lon,
+            d.bbox_max_lat,
+            d.total_cells,
+            d.total_weight,
+            COALESCE(uds.visited_cells, 0) AS user_visited_cells,
+            COALESCE(uds.visited_weight, 0.0) AS user_visited_weight
+        FROM districts AS d
+        LEFT JOIN user_district_stats AS uds
+            ON uds.district_id = d.id AND uds.user_id = ?
+        WHERE d.id IN ({placeholders})
+    """
+
+    params: List[Any] = [user_id, *ids_list]
+    cur = conn.execute(sql, params)
+    return cur.fetchall()
+
+
+def select_user_hexes_in_bbox(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+) -> List[str]:
+    hexagons: List[str] = []
+    for h3_index in select_user_hexes(conn, user_id):
+        lat, lon = h3.cell_to_latlng(h3_index)
+        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+            hexagons.append(h3_index)
+    return hexagons
+
+
+def delete_visit_by_hex(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    h3_index: str,
+) -> int:
+    district_info = select_district_for_cell(conn, h3_index)
+    okrug_id: Optional[int] = None
+    coverage = 0.0
+    decrement_cell = 0
+    if district_info:
+        district_id, coverage = district_info
+        okrug_id = select_district_parent(conn, district_id)
+        if coverage >= PRIMARY_COVERAGE_THRESHOLD:
+            decrement_cell = 1
+
+    cur = conn.execute(
+        "DELETE FROM user_visits_atomic WHERE user_id = ? AND h3 = ?",
+        (user_id, h3_index),
+    )
+    if cur.rowcount == 0:
+        conn.commit()
+        return 0
+
+    if district_info:
+        district_id, _ = district_info
+        conn.execute(
+            """
+            UPDATE user_district_stats
+            SET visited_cells = MAX(0, visited_cells - ?),
+                visited_weight = MAX(0.0, visited_weight - ?)
+            WHERE user_id = ? AND district_id = ?
+            """,
+            (decrement_cell, coverage, user_id, district_id),
+        )
+        if okrug_id is not None:
+            conn.execute(
+                """
+                UPDATE user_okrug_stats
+                SET visited_cells = MAX(0, visited_cells - ?),
+                    visited_weight = MAX(0.0, visited_weight - ?)
+                WHERE user_id = ? AND okrug_id = ?
+                """,
+                (decrement_cell, coverage, user_id, okrug_id),
+            )
+
+    conn.commit()
+    return cur.rowcount
+
+
+def get_district_by_id(conn: sqlite3.Connection, district_id: int) -> Optional[sqlite3.Row]:
+    cur = conn.execute(
+        """
+        SELECT
+            id,
+            level,
+            name_ru,
+            parent_id,
+            geom_geojson,
+            bbox_min_lon,
+            bbox_min_lat,
+            bbox_max_lon,
+            bbox_max_lat,
+            total_cells,
+            total_weight
+        FROM districts
+        WHERE id = ?
+        """,
+        (district_id,),
+    )
+    return cur.fetchone()
+
+
+def fetch_district_cells(
+    conn: sqlite3.Connection, district_id: int
+) -> List[Tuple[str, float]]:
+    cur = conn.execute(
+        "SELECT h3, coverage FROM district_cells WHERE district_id = ?",
+        (district_id,),
+    )
+    return [(str(row[0]), float(row[1])) for row in cur.fetchall()]
+
+
+def fetch_user_visited_cells_for_district(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    district_id: int,
+) -> List[str]:
+    cur = conn.execute(
+        """
+        SELECT v.h3
+        FROM user_visits_atomic AS v
+        INNER JOIN district_cells AS dc ON dc.h3 = v.h3
+        WHERE v.user_id = ? AND dc.district_id = ?
+        """,
+        (user_id, district_id),
+    )
+    return [str(row[0]) for row in cur.fetchall()]
+
+
+def fetch_user_total_progress(conn: sqlite3.Connection, user_id: int) -> Dict[str, float]:
+    cur = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(d.total_cells), 0) AS total_cells,
+            COALESCE(SUM(d.total_weight), 0.0) AS total_weight,
+            COALESCE(SUM(uds.visited_cells), 0) AS visited_cells,
+            COALESCE(SUM(uds.visited_weight), 0.0) AS visited_weight
+        FROM districts AS d
+        LEFT JOIN user_district_stats AS uds
+            ON uds.district_id = d.id AND uds.user_id = ?
+        WHERE d.level = 'district'
+    """,
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {
+            "total_cells": 0,
+            "total_weight": 0.0,
+            "visited_cells": 0,
+            "visited_weight": 0.0,
+        }
+    return {
+        "total_cells": int(row[0]) if row[0] is not None else 0,
+        "total_weight": float(row[1]) if row[1] is not None else 0.0,
+        "visited_cells": int(row[2]) if row[2] is not None else 0,
+        "visited_weight": float(row[3]) if row[3] is not None else 0.0,
+    }
+
+
+def fetch_user_okrug_progress(conn: sqlite3.Connection, user_id: int) -> List[sqlite3.Row]:
+    cur = conn.execute(
+        """
+        SELECT
+            o.id,
+            o.name_ru,
+            o.parent_id,
+            COALESCE(SUM(d.total_cells), 0) AS total_cells,
+            COALESCE(SUM(d.total_weight), 0.0) AS total_weight,
+            COALESCE(SUM(uds.visited_cells), 0) AS visited_cells,
+            COALESCE(SUM(uds.visited_weight), 0.0) AS visited_weight
+        FROM districts AS o
+        LEFT JOIN districts AS d ON d.parent_id = o.id AND d.level = 'district'
+        LEFT JOIN user_district_stats AS uds
+            ON uds.district_id = d.id AND uds.user_id = ?
+        WHERE o.level = 'okrug'
+        GROUP BY o.id, o.name_ru, o.parent_id
+        ORDER BY o.name_ru
+    """,
+        (user_id,),
+    )
+    return cur.fetchall()
+
+
+def fetch_user_bottom_districts(
+    conn: sqlite3.Connection, user_id: int, limit: int = 3
+) -> List[sqlite3.Row]:
+    cur = conn.execute(
+        """
+        SELECT
+            d.id,
+            d.name_ru,
+            d.parent_id,
+            parent.name_ru AS parent_name,
+            d.total_cells,
+            d.total_weight,
+            COALESCE(uds.visited_cells, 0) AS visited_cells,
+            COALESCE(uds.visited_weight, 0.0) AS visited_weight,
+            CASE
+                WHEN d.total_cells > 0 THEN
+                    CAST(COALESCE(uds.visited_cells, 0) AS REAL) / d.total_cells
+                ELSE NULL
+            END AS progress_ratio
+        FROM districts AS d
+        LEFT JOIN districts AS parent ON parent.id = d.parent_id
+        LEFT JOIN user_district_stats AS uds
+            ON uds.district_id = d.id AND uds.user_id = ?
+        WHERE d.level = 'district'
+          AND d.total_cells > 0
+        ORDER BY progress_ratio ASC, d.name_ru ASC
+        LIMIT ?
+    """,
+        (user_id, limit),
+    )
+    return cur.fetchall()
+
+
+def get_total_cells_and_weight(
+    conn: sqlite3.Connection, *, level: str
+) -> Tuple[int, float]:
+    if level not in {"district", "okrug"}:
+        raise ValueError("Unsupported level")
+
+    conn.row_factory = sqlite3.Row
+
+    if level == "district":
+        sql = """
+            SELECT
+                COALESCE(SUM(total_cells), 0) AS total_cells,
+                COALESCE(SUM(total_weight), 0.0) AS total_weight
+            FROM districts
+            WHERE level = 'district'
+        """
+        row = conn.execute(sql).fetchone()
+        if not row:
+            return 0, 0.0
+        return int(row["total_cells"] or 0), float(row["total_weight"] or 0.0)
+
+    sql = """
+        SELECT
+            COALESCE(SUM(grouped.total_cells), 0) AS total_cells,
+            COALESCE(SUM(grouped.total_weight), 0.0) AS total_weight
+        FROM (
+            SELECT
+                ok.id,
+                COALESCE(child_totals.total_cells, ok.total_cells, 0) AS total_cells,
+                COALESCE(child_totals.total_weight, ok.total_weight, 0.0) AS total_weight
+            FROM districts AS ok
+            LEFT JOIN (
+                SELECT
+                    parent_id AS okrug_id,
+                    SUM(total_cells) AS total_cells,
+                    SUM(total_weight) AS total_weight
+                FROM districts
+                WHERE level = 'district'
+                GROUP BY parent_id
+            ) AS child_totals ON child_totals.okrug_id = ok.id
+            WHERE ok.level = 'okrug'
+        ) AS grouped
+    """
+    row = conn.execute(sql).fetchone()
+    if not row:
+        return 0, 0.0
+    return int(row["total_cells"] or 0), float(row["total_weight"] or 0.0)
+
+
+def fetch_leaderboard(
+    conn: sqlite3.Connection,
+    *,
+    level: str,
+    period: str,
+    limit: int,
+) -> List[sqlite3.Row]:
+    if level not in {"district", "okrug"}:
+        raise ValueError("Unsupported level")
+    if period not in {"week", "season"}:
+        raise ValueError("Unsupported period")
+    if limit <= 0:
+        return []
+
+    now_ts = int(time.time())
+    period_seconds = 7 * 24 * 3600 if period == "week" else 90 * 24 * 3600
+    since_ts = max(0, now_ts - period_seconds)
+
+    conn.row_factory = sqlite3.Row
+
+    sql = """
+        WITH recent_visits AS (
+            SELECT
+                v.user_id,
+                dc.coverage AS coverage,
+                CASE WHEN dc.coverage >= ? THEN 1 ELSE 0 END AS cell_credit
+            FROM user_visits_atomic AS v
+            INNER JOIN district_cells AS dc ON dc.h3 = v.h3
+            INNER JOIN districts AS child ON child.id = dc.district_id
+            LEFT JOIN districts AS parent ON parent.id = child.parent_id
+            WHERE v.ts >= ?
+              AND (? = 'district' OR parent.id IS NOT NULL)
+        ),
+        aggregated AS (
+            SELECT
+                rv.user_id,
+                SUM(rv.cell_credit) AS visited_cells,
+                SUM(rv.coverage) AS visited_weight
+            FROM recent_visits AS rv
+            GROUP BY rv.user_id
+        )
+        SELECT
+            a.user_id,
+            u.username,
+            COALESCE(a.visited_cells, 0) AS visited_cells,
+            COALESCE(a.visited_weight, 0.0) AS visited_weight
+        FROM aggregated AS a
+        INNER JOIN users AS u ON u.id = a.user_id
+        WHERE a.visited_cells > 0 OR a.visited_weight > 0.0
+        ORDER BY a.visited_cells DESC, a.visited_weight DESC, a.user_id ASC
+        LIMIT ?
+    """
+
+    params = [PRIMARY_COVERAGE_THRESHOLD, since_ts, level, limit]
+    cur = conn.execute(sql, params)
+    return cur.fetchall()
+
+
+main.py:
+import os
+import json
+import hmac
+import hashlib
+import urllib.parse
+import logging
+from logging.handlers import RotatingFileHandler
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+
+from fastapi import FastAPI, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, ValidationError
+import h3
+from starlette.middleware.sessions import SessionMiddleware
+
+from . import db as db_module
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# File logging to project root
+try:
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_file_path = os.path.join(project_root, "server.log")
+    need_handler = True
+    for h in logging.getLogger().handlers:
+        if isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == os.path.abspath(log_file_path):
+            need_handler = False
+            break
+    if need_handler:
+        fh = RotatingFileHandler(log_file_path, maxBytes=1_000_000, backupCount=3)
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(fh)
+        logger.info(f"File logging enabled at {log_file_path}")
+except Exception as e:
+    logger.warning(f"Failed to set up file logging: {e}")
+
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+if not TELEGRAM_BOT_TOKEN:
+    # Do not crash on import; raise on first guarded route.
+    pass
+
+# Debug mode toggle: when enabled, only debug auth endpoints are active
+DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "0") == "1"
+# No-auth local mode: bypass Telegram auth and use a fixed local user
+NO_AUTH_MODE = os.getenv("NO_AUTH_MODE", "0") == "1"
+
+
+def verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 86400) -> Dict:
+    logger.info(f"Verifying initData: {len(raw_init_data)} chars")
+    data = dict(urllib.parse.parse_qsl(raw_init_data, keep_blank_values=True))
+    recv_hash = data.pop("hash", None)
+    if not recv_hash:
+        logger.warning("Missing hash in initData")
+        return {"ok": False, "reason": "missing hash"}
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+
+    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    exp_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(exp_hash, recv_hash):
+        logger.warning(f"Hash mismatch: expected {exp_hash[:16]}..., got {recv_hash[:16]}...")
+        return {"ok": False, "reason": "hash mismatch"}
+
+    try:
+        auth_ts = int(data.get("auth_date", "0"))
+    except ValueError:
+        logger.warning(f"Invalid auth_date format: {data.get('auth_date')}")
+        return {"ok": False, "reason": "bad auth_date"}
+    if auth_ts <= 0:
+        logger.warning(f"Empty auth_date: {auth_ts}")
+        return {"ok": False, "reason": "empty auth_date"}
+    if datetime.now(timezone.utc) - datetime.fromtimestamp(auth_ts, tz=timezone.utc) > timedelta(seconds=max_age_sec):
+        logger.warning(f"Stale auth_date: {auth_ts}")
+        return {"ok": False, "reason": "stale auth_date"}
+
+    # Do not parse user JSON here to avoid side effects; just log payload keys
+    logger.info(f"InitData verified successfully; payload keys: {sorted(list(data.keys()))}")
+    return {"ok": True, "payload": data}
+
+
+class VisitRequest(BaseModel):
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lon: float = Field(..., ge=-180.0, le=180.0)
+
+
+class Circle(BaseModel):
+    lat: float
+    lon: float
+
+
+class RegionStats(BaseModel):
+    id: int
+    visited_cells: int
+    visited_weight: float
+
+
+class VisitStats(BaseModel):
+    total_circles: int
+    district: Optional[RegionStats] = None
+    okrug: Optional[RegionStats] = None
+
+
+class VisitResponse(BaseModel):
+    added: int
+    circle: Circle
+    stats: VisitStats
+
+
+class CirclesResponse(BaseModel):
+    hexagons: List[str]
+
+
+class ProgressBreakdown(BaseModel):
+    visited_cells: int
+    total_cells: int
+    percent: float
+    percent_cells: float = 0.0
+    percent_weight: float = 0.0
+    visited_weight: float = 0.0
+    total_weight: float = 0.0
+
+
+class DistrictFeatureResponse(BaseModel):
+    id: int
+    name: str
+    level: Literal["okrug", "district"]
+    parent_id: Optional[int] = None
+    bbox: Optional[List[float]] = None
+    geom: Dict[str, Any]
+    progress: ProgressBreakdown
+
+
+class DistrictCellResponse(BaseModel):
+    h3: str
+    coverage: float
+    visited: bool
+    total_children: Optional[int] = None
+    visited_children: Optional[int] = None
+    visited_fraction: Optional[float] = None
+
+
+class DistrictCellsResponse(BaseModel):
+    district_id: int
+    resolution: int
+    base_resolution: int
+    cells: List[DistrictCellResponse]
+
+
+class OkrugSummaryEntry(BaseModel):
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    progress: ProgressBreakdown
+
+
+class DistrictSummaryEntry(BaseModel):
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    parent_name: Optional[str] = None
+    progress: ProgressBreakdown
+
+
+class StatsSummaryResponse(BaseModel):
+    total: ProgressBreakdown
+    okrugs: List[OkrugSummaryEntry]
+    bottom_districts: List[DistrictSummaryEntry]
+
+
+class LeaderboardEntry(BaseModel):
+    rank: int
+    user_id: int
+    username: Optional[str]
+    visited_cells: int
+    visited_weight: float
+    percent_cells: float
+    percent_weight: float
+
+
+class LeaderboardResponse(BaseModel):
+    level: Literal["district", "okrug"]
+    period: Literal["week", "season"]
+    generated_at: datetime
+    entries: List[LeaderboardEntry]
+
+
+def _parse_bbox(bbox: str) -> Tuple[float, float, float, float]:
+    try:
+        min_lon_str, min_lat_str, max_lon_str, max_lat_str = bbox.split(",")
+        min_lon, min_lat = float(min_lon_str), float(min_lat_str)
+        max_lon, max_lat = float(max_lon_str), float(max_lat_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad bbox")
+
+    if min_lon > max_lon or min_lat > max_lat:
+        raise HTTPException(status_code=400, detail="bad bbox order")
+    return min_lon, min_lat, max_lon, max_lat
+
+
+def _progress_from_counts(
+    visited_cells: int,
+    total_cells: int,
+    *,
+    visited_weight: float = 0.0,
+    total_weight: float = 0.0,
+) -> ProgressBreakdown:
+    percent_cells = 0.0
+    percent_weight = 0.0
+
+    if total_cells > 0:
+        percent_cells = round((visited_cells / total_cells) * 100.0, 2)
+
+    if total_weight > 0:
+        percent_weight = round((visited_weight / total_weight) * 100.0, 2)
+
+    return ProgressBreakdown(
+        visited_cells=int(visited_cells),
+        total_cells=int(total_cells),
+        percent=percent_cells,
+        percent_cells=percent_cells,
+        percent_weight=percent_weight,
+        visited_weight=float(visited_weight),
+        total_weight=float(total_weight),
+    )
+
+
+def _parse_res_view(res_view: Optional[str], base_resolution: int) -> int:
+    if not res_view:
+        return base_resolution
+    try:
+        candidate = int(res_view.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad res_view")
+
+    if candidate < 0:
+        raise HTTPException(status_code=400, detail="bad res_view")
+    if candidate > base_resolution:
+        raise HTTPException(status_code=400, detail="res_view must be <= base resolution")
+    return candidate
+
+
+def _build_cells_payload(
+    base_cells: List[Tuple[str, float]],
+    visited: Set[str],
+    base_resolution: int,
+    target_resolution: int,
+) -> List[DistrictCellResponse]:
+    if target_resolution >= base_resolution:
+        target_resolution = base_resolution
+
+    if target_resolution == base_resolution:
+        cells: List[DistrictCellResponse] = []
+        for h3_index, coverage in base_cells:
+            is_visited = h3_index in visited
+            cells.append(
+                DistrictCellResponse(
+                    h3=h3_index,
+                    coverage=round(float(coverage), 6),
+                    visited=is_visited,
+                    total_children=1,
+                    visited_children=1 if is_visited else 0,
+                    visited_fraction=1.0 if is_visited else 0.0,
+                )
+            )
+        cells.sort(key=lambda c: c.h3)
+        return cells
+
+    aggregated: Dict[str, Dict[str, Any]] = {}
+    for h3_index, coverage in base_cells:
+        try:
+            parent_h3 = h3.cell_to_parent(h3_index, target_resolution)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Failed to compute parent for %s at res %s: %s", h3_index, target_resolution, exc)
+            parent_h3 = h3_index
+
+        bucket = aggregated.setdefault(
+            parent_h3,
+            {
+                "coverage_sum": 0.0,
+                "total_children": 0,
+                "visited_children": 0,
+            },
+        )
+        bucket["coverage_sum"] += float(coverage)
+        bucket["total_children"] += 1
+        if h3_index in visited:
+            bucket["visited_children"] += 1
+
+    cells: List[DistrictCellResponse] = []
+    for parent_h3, bucket in aggregated.items():
+        total_children = bucket["total_children"] or 1
+        visited_children = bucket["visited_children"]
+        coverage_avg = bucket["coverage_sum"] / total_children
+        visited_fraction = visited_children / total_children
+        cells.append(
+            DistrictCellResponse(
+                h3=parent_h3,
+                coverage=round(min(1.0, coverage_avg), 6),
+                visited=visited_children > 0,
+                total_children=total_children,
+                visited_children=visited_children,
+                visited_fraction=round(visited_fraction, 6),
+            )
+        )
+
+    cells.sort(key=lambda c: c.h3)
+    return cells
+
+
+def _get_user_from_session(request: Request) -> Optional[Tuple[int, Optional[str]]]:
+    if request.session.get("tg_authenticated") and request.session.get("tg_user_id"):
+        try:
+            tg_id = int(request.session["tg_user_id"])
+            tg_user = request.session.get("tg_user", {})
+            username = tg_user.get("username") if isinstance(tg_user, dict) else None
+
+            conn = db_module.get_connection()
+            user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
+            logger.info(
+                "User authenticated via session: user_id=%s, tg_id=%s, username=%s",
+                user_id,
+                tg_id,
+                username,
+            )
+            return user_id, username
+        except (ValueError, TypeError):
+            logger.warning("Invalid user data in session", exc_info=True)
+            return None
+    return None
+
+
+def _get_user_from_header(telegram_init: str) -> Tuple[int, Optional[str]]:
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN not set")
+        raise HTTPException(status_code=500, detail="Server misconfigured: TELEGRAM_BOT_TOKEN not set")
+
+    result = verify_init_data(telegram_init, TELEGRAM_BOT_TOKEN)
+    if not result.get("ok"):
+        raise HTTPException(status_code=401, detail=result.get("reason", "bad initData"))
+
+    payload = result["payload"]
+    user_raw = payload.get("user")
+    if not user_raw:
+        raise HTTPException(status_code=401, detail="no user in initData")
+
+    try:
+        user_obj = json.loads(user_raw)
+        tg_id = int(user_obj["id"])
+        username = user_obj.get("username")
+    except (json.JSONDecodeError, KeyError, ValueError):
+        raise HTTPException(status_code=401, detail="bad user json")
+
+    conn = db_module.get_connection()
+    user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
+    logger.info(
+        "User authenticated via header: user_id=%s, tg_id=%s, username=%s",
+        user_id,
+        tg_id,
+        username,
+    )
+    return user_id, username
+
+
+async def get_current_user(
+    request: Request,
+    telegram_init: Optional[str] = Header(default=None, alias="X-Telegram-Init"),
+) -> Tuple[int, Optional[str]]:
+    logger.info("Authenticating user")
+
+    if NO_AUTH_MODE:
+        conn = db_module.get_connection()
+        user_id = db_module.ensure_user(conn, tg_id=999_999_999, username="local")
+        logger.warning("NO_AUTH_MODE enabled: bypassing auth, using local user")
+        return user_id, "local"
+
+    session_user = _get_user_from_session(request)
+    if session_user:
+        return session_user
+
+    if DEBUG_AUTH_MODE:
+        raise HTTPException(status_code=503, detail="Authentication via session only in debug auth mode")
+
+    if not telegram_init:
+        logger.warning("No X-Telegram-Init header provided")
+        raise HTTPException(status_code=401, detail="missing initData")
+
+    return _get_user_from_header(telegram_init)
+
+
+app = FastAPI(title="City Fog Map API", version="0.1.0")
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("🚀 City Fog Map API starting up...")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("🛑 City Fog Map API shutting down...")
+
+# Static frontend at /webapp
+webapp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp")
+if not os.path.isdir(webapp_dir):
+    os.makedirs(webapp_dir, exist_ok=True)
+class LongCacheStatic(StaticFiles):
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        # Index handled separately; here set long cache for assets
+        if response.status_code == 200 and response.media_type != "text/html":
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        return response
+
+app.mount("/webapp", LongCacheStatic(directory=webapp_dir, html=True), name="webapp")
+
+# Version for cache-busting static assets
+APP_VERSION = os.getenv("APP_VERSION")
+if not APP_VERSION:
+    try:
+        app_js_path = os.path.join(webapp_dir, "app.js")
+        APP_VERSION = str(int(os.path.getmtime(app_js_path)))
+    except Exception:
+        APP_VERSION = str(int(time.time()))
+
+def _read_index_with_version() -> str:
+    index_path = os.path.join(webapp_dir, "index.html")
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        # inject version to app.js, style.css, and fog.js
+        html = html.replace("/webapp/app.js", f"/webapp/app.js?v={APP_VERSION}")
+        html = html.replace("/webapp/style.css", f"/webapp/style.css?v={APP_VERSION}")
+        html = html.replace("/webapp/fog.js", f"/webapp/fog.js?v={APP_VERSION}")
+        return html
+    except Exception as e:
+        logger.error(f"Failed to read index.html: {e}")
+        return "<html><body>index missing</body></html>"
+
+# Redirect root to the appropriate page
+@app.get("/")
+async def root_redirect():
+    if DEBUG_AUTH_MODE:
+        return RedirectResponse(url="/webapp/debug-auth.html")
+    return RedirectResponse(url="/webapp/")
+
+# Sessions for debug auth flow
+SESSION_SECRET = os.getenv("SESSION_SECRET", os.urandom(32).hex())
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+
+
+# Simple request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.perf_counter()
+    # Log inbound request details (safe for sensitive headers)
+    path_and_qs = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    client_host = getattr(getattr(request, "client", None), "host", "-")
+    ua = request.headers.get("User-Agent", "-")
+    ref = request.headers.get("Referer", "-")
+    origin = request.headers.get("Origin", "-")
+    init_header = request.headers.get("X-Telegram-Init")
+    init_len = len(init_header) if init_header else 0
+    init_hash = hashlib.sha256(init_header.encode()).hexdigest()[:12] if init_header else None
+    logger.info(
+        f"HTTP REQ {request.method} {path_and_qs} from {client_host} "
+        f"ua='{ua[:120]}' ref='{ref[:160]}' origin='{origin[:120]}' "
+        f"tg_init_present={bool(init_header)} tg_init_len={init_len} tg_init_sha256={init_hash or '-'}"
+    )
+    response = None
+    error: Exception | None = None
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as exc:
+        error = exc
+        raise
+    finally:
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        status_code = getattr(response, "status_code", 500 if error else "n/a")
+        suffix = f" error={type(error).__name__}" if error else ""
+        logger.info(
+            f"HTTP RES {request.method} {path_and_qs} -> {status_code} in {duration_ms:.1f} ms{suffix}"
+        )
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    logger.info("Database initialization...")
+    conn = db_module.get_connection()
+    db_module.init_db(conn)
+    logger.info("Database initialized successfully")
+
+
+@app.get("/webapp/")
+async def webapp_index() -> Response:
+    html = _read_index_with_version()
+    injection = f'<script>window.__CITY_FOG_BASE_RESOLUTION__ = {db_module.BASE_VISIT_RESOLUTION};</script>'
+    marker = '<script src="/webapp/app.js"></script>'
+    if marker in html:
+        html = html.replace(marker, f"{injection}\n    {marker}")
+    else:
+        html = f"{html}\n{injection}"
+    headers = {"Cache-Control": "no-store"}
+    return Response(content=html, media_type="text/html; charset=utf-8", headers=headers)
+
+
+@app.get("/health")
+async def health() -> Dict[str, str]:
+    logger.info("Health check requested")
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/visit", response_model=VisitResponse)
+async def visit_area(body: VisitRequest, user=Depends(get_current_user)):
+    # DEBUG_AUTH_MODE check is now in get_current_user
+    user_id, _ = user
+    logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
+
+    conn = db_module.get_connection()
+
+    lat, lon = float(body.lat), float(body.lon)
+
+    geokey = h3.latlng_to_cell(lat, lon, db_module.BASE_VISIT_RESOLUTION)
+
+    district_row = db_module.select_district_for_cell(conn, geokey)
+    if not district_row:
+        logger.info(f"Visit ignored: no district for geokey={geokey}")
+        stats_dict = db_module.fetch_user_stats(conn, user_id=user_id, district_id=None, okrug_id=None)
+        stats = VisitStats(
+            total_circles=stats_dict["total_circles"],
+            district=None,
+            okrug=None,
+        )
+        return VisitResponse(
+            added=0,
+            circle=Circle(lat=lat, lon=lon),
+            stats=stats,
+        )
+
+    district_id, coverage = district_row
+    okrug_id = db_module.select_district_parent(conn, district_id)
+
+    added = db_module.record_visit_and_increment_stats(
+        conn,
+        user_id=user_id,
+        h3_index=geokey,
+        district_id=district_id,
+        coverage=coverage,
+        okrug_id=okrug_id,
+    )
+
+    stats_dict = db_module.fetch_user_stats(
+        conn,
+        user_id=user_id,
+        district_id=district_id,
+        okrug_id=okrug_id,
+    )
+    stats = VisitStats(
+        total_circles=stats_dict["total_circles"],
+        district=RegionStats(**stats_dict["district"]) if stats_dict.get("district") else None,
+        okrug=RegionStats(**stats_dict["okrug"]) if stats_dict.get("okrug") else None,
+    )
+
+    logger.info(
+        f"Visit processed: added={added}, district_id={district_id}, okrug_id={okrug_id}, geokey={geokey}, coverage={coverage:.3f}"
+    )
+    return VisitResponse(
+        added=1 if added else 0,
+        circle=Circle(lat=lat, lon=lon),
+        stats=stats,
+    )
+
+
+@app.get("/api/v1/circles", response_model=CirclesResponse)
+async def list_circles(bbox: str, user=Depends(get_current_user)):
+    # DEBUG_AUTH_MODE check is now in get_current_user
+    user_id, _ = user
+    logger.info(f"Circles request: bbox={bbox}, user_id={user_id}")
+
+    try:
+        min_lon_str, min_lat_str, max_lon_str, max_lat_str = bbox.split(",")
+        min_lon, min_lat = float(min_lon_str), float(min_lat_str)
+        max_lon, max_lat = float(max_lon_str), float(max_lat_str)
+    except Exception as e:
+        logger.error(f"Invalid bbox format: {bbox}, error: {e}")
+        raise HTTPException(status_code=400, detail="bad bbox")
+
+    conn = db_module.get_connection()
+    hexagons = db_module.select_user_hexes_in_bbox(
+        conn,
+        user_id=user_id,
+        min_lat=min_lat,
+        min_lon=min_lon,
+        max_lat=max_lat,
+        max_lon=max_lon,
+    )
+
+    logger.info(f"Circles response: {len(hexagons)} hexagons returned")
+    return CirclesResponse(hexagons=hexagons)
+
+
+class DeleteCircleRequest(BaseModel):
+    geokey: str = Field(..., min_length=10, max_length=20)
+
+
+@app.delete("/api/v1/circle")
+async def delete_circle(body: DeleteCircleRequest, user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    deleted = db_module.delete_visit_by_hex(conn, user_id=user_id, h3_index=body.geokey)
+    return {"deleted": int(deleted)}
+
+
+# -------------------------
+# Debug auth endpoints
+# -------------------------
+
+class AuthRequest(BaseModel):
+    initData: str
+
+
+@app.post("/api/auth")
+async def debug_auth(body: AuthRequest, request: Request):
+    logger.info(f"/api/auth called; initData length={len(body.initData)}")
+    result = verify_init_data(body.initData, TELEGRAM_BOT_TOKEN)
+    if not result.get("ok"):
+        logger.warning(f"/api/auth unauthorized: {result.get('reason')}")
+        raise HTTPException(status_code=403, detail="unauthorized")
+
+    payload = result["payload"]
+    user_raw = payload.get("user")
+    user_obj = None
+    if user_raw:
+        try:
+            user_obj = json.loads(user_raw)
+        except json.JSONDecodeError:
+            logger.warning("/api/auth: user JSON decode error")
+
+    request.session["tg_authenticated"] = True
+    request.session["tg_user_id"] = (user_obj or {}).get("id")
+    request.session["tg_user"] = user_obj
+
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def debug_me(request: Request):
+    if not request.session.get("tg_authenticated"):
+        raise HTTPException(status_code=403, detail="unauthorized")
+    logger.info(f"/api/me cookie keys: {list(request.cookies.keys())}")
+    return {"ok": True, "user": request.session.get("tg_user")}
+
+
+@app.get("/api/ping")
+async def ping():
+    return {"ok": True}
+
+
+@app.get("/api/v1/debug-mode")
+async def debug_mode():
+    """Return debug mode status for frontend"""
+    return {
+        "debug_auth_mode": DEBUG_AUTH_MODE,
+        "no_auth_mode": NO_AUTH_MODE,
+        "base_visit_resolution": db_module.BASE_VISIT_RESOLUTION,
+    }
+
+
+# Dev utility: clear entire database (allowed only in debug/no-auth)
+@app.post("/api/v1/dev/clear-db")
+async def dev_clear_db():
+    if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        raise HTTPException(status_code=403, detail="forbidden")
+    conn = db_module.get_connection()
+    cleared_circles, cleared_users = db_module.clear_all(conn)
+    logger.warning(f"DEV clear-db executed: circles={cleared_circles}, users={cleared_users}")
+    return {"cleared_circles": int(cleared_circles), "cleared_users": int(cleared_users)}
+
+
+@app.get(
+    "/api/v1/districts",
+    response_model=List[DistrictFeatureResponse],
+)
+async def list_districts(
+    bbox: str = Query(..., description="minLon,minLat,maxLon,maxLat"),
+    level: Literal["okrug", "district"] = Query(
+        "district", description="Administrative level to return"
+    ),
+    user=Depends(get_current_user),
+):
+    user_id, _ = user
+    min_lon, min_lat, max_lon, max_lat = _parse_bbox(bbox)
+    conn = db_module.get_connection()
+    rows = db_module.fetch_districts_in_bbox(
+        conn,
+        user_id=user_id,
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        level=level,
+    )
+
+    features: List[DistrictFeatureResponse] = []
+    for row in rows:
+        bbox_values: Optional[List[float]] = None
+        if (
+            row["bbox_min_lon"] is not None
+            and row["bbox_min_lat"] is not None
+            and row["bbox_max_lon"] is not None
+            and row["bbox_max_lat"] is not None
+        ):
+            bbox_values = [
+                float(row["bbox_min_lon"]),
+                float(row["bbox_min_lat"]),
+                float(row["bbox_max_lon"]),
+                float(row["bbox_max_lat"]),
+            ]
+
+        geom_raw = row["geom_geojson"]
+        geom_payload: Dict[str, Any]
+        try:
+            geom_payload = json.loads(geom_raw) if geom_raw else {}
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode geometry for district %s", row["id"])
+            geom_payload = {}
+
+        total_cells = int(row["total_cells"]) if row["total_cells"] is not None else 0
+        total_weight = float(row["total_weight"]) if row["total_weight"] is not None else 0.0
+        visited_cells = (
+            int(row["user_visited_cells"]) if row["user_visited_cells"] is not None else 0
+        )
+        visited_weight = (
+            float(row["user_visited_weight"]) if row["user_visited_weight"] is not None else 0.0
+        )
+
+        progress = _progress_from_counts(
+            visited_cells=visited_cells,
+            total_cells=total_cells,
+            visited_weight=visited_weight,
+            total_weight=total_weight,
+        )
+
+        parent_id = row["parent_id"]
+        features.append(
+            DistrictFeatureResponse(
+                id=int(row["id"]),
+                name=str(row["name_ru"]),
+                level=str(row["level"]),
+                parent_id=int(parent_id) if parent_id is not None else None,
+                bbox=bbox_values,
+                geom=geom_payload,
+                progress=progress,
+            )
+        )
+
+    return features
+
+
+@app.get(
+    "/api/v1/district/{district_id}/cells",
+    response_model=DistrictCellsResponse,
+)
+async def get_district_cells(
+    district_id: int,
+    res_view: Optional[str] = Query(
+        None, description="Optional H3 resolution to aggregate to (<= base)"
+    ),
+    user=Depends(get_current_user),
+):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    district_row = db_module.get_district_by_id(conn, district_id)
+    if not district_row:
+        raise HTTPException(status_code=404, detail="district not found")
+
+    base_cells = db_module.fetch_district_cells(conn, district_id)
+    if base_cells:
+        base_resolution = h3.get_resolution(base_cells[0][0])
+    else:
+        base_resolution = db_module.BASE_VISIT_RESOLUTION
+
+    visited_cells = set(
+        db_module.fetch_user_visited_cells_for_district(
+            conn, user_id=user_id, district_id=district_id
+        )
+    )
+
+    target_resolution = _parse_res_view(res_view, base_resolution)
+    cells_payload = _build_cells_payload(
+        base_cells,
+        visited_cells,
+        base_resolution,
+        target_resolution,
+    )
+
+    return DistrictCellsResponse(
+        district_id=district_id,
+        resolution=target_resolution,
+        base_resolution=base_resolution,
+        cells=cells_payload,
+    )
+
+
+@app.post("/api/v1/district/{district_id}/reveal")
+async def reveal_district(
+    district_id: int,
+    payload: Dict[str, Any],
+    user=Depends(get_current_user),
+):
+    user_id, _ = user
+    if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    conn = db_module.get_connection()
+    district_row = db_module.get_district_by_id(conn, district_id)
+    if not district_row:
+        raise HTTPException(status_code=404, detail="district not found")
+
+    base_cells = db_module.fetch_district_cells(conn, district_id)
+    if not base_cells:
+        return {"new_hexagons": []}
+
+    okrug_id = db_module.select_district_parent(conn, district_id)
+
+    requested_cells = set()
+    if isinstance(payload, dict):
+        cells = payload.get("cells")
+        if isinstance(cells, list):
+            requested_cells = {str(cell) for cell in cells}
+
+    new_hexagons: List[str] = []
+    already_visited = set(
+        db_module.fetch_user_visited_cells_for_district(
+            conn, user_id=user_id, district_id=district_id
+        )
+    )
+
+    for h3_index, coverage in base_cells:
+        if requested_cells and h3_index not in requested_cells:
+            continue
+        added = db_module.record_visit_and_increment_stats(
+            conn,
+            user_id=user_id,
+            h3_index=h3_index,
+            district_id=district_id,
+            coverage=coverage,
+            okrug_id=okrug_id,
+        )
+        if added:
+            new_hexagons.append(h3_index)
+
+    return {"new_hexagons": new_hexagons}
+
+
+@app.get("/api/v1/stats/summary", response_model=StatsSummaryResponse)
+async def get_stats_summary(user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+
+    totals = db_module.fetch_user_total_progress(conn, user_id=user_id)
+    total_progress = _progress_from_counts(
+        visited_cells=int(totals["visited_cells"]),
+        total_cells=int(totals["total_cells"]),
+        visited_weight=float(totals["visited_weight"]),
+        total_weight=float(totals["total_weight"]),
+    )
+
+    okrug_rows = db_module.fetch_user_okrug_progress(conn, user_id=user_id)
+    okrugs: List[OkrugSummaryEntry] = []
+    for row in okrug_rows:
+        okrugs.append(
+            OkrugSummaryEntry(
+                id=int(row["id"]),
+                name=str(row["name_ru"]),
+                parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
+                progress=_progress_from_counts(
+                    visited_cells=int(row["visited_cells"]) if row["visited_cells"] is not None else 0,
+                    total_cells=int(row["total_cells"]) if row["total_cells"] is not None else 0,
+                    visited_weight=float(row["visited_weight"]) if row["visited_weight"] is not None else 0.0,
+                    total_weight=float(row["total_weight"]) if row["total_weight"] is not None else 0.0,
+                ),
+            )
+        )
+
+    bottom_rows = db_module.fetch_user_bottom_districts(conn, user_id=user_id, limit=3)
+    bottom_districts: List[DistrictSummaryEntry] = []
+    for row in bottom_rows:
+        bottom_districts.append(
+            DistrictSummaryEntry(
+                id=int(row["id"]),
+                name=str(row["name_ru"]),
+                parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
+                parent_name=str(row["parent_name"]) if row["parent_name"] is not None else None,
+                progress=_progress_from_counts(
+                    visited_cells=int(row["visited_cells"]) if row["visited_cells"] is not None else 0,
+                    total_cells=int(row["total_cells"]) if row["total_cells"] is not None else 0,
+                    visited_weight=float(row["visited_weight"]) if row["visited_weight"] is not None else 0.0,
+                    total_weight=float(row["total_weight"]) if row["total_weight"] is not None else 0.0,
+                ),
+            )
+        )
+
+    return StatsSummaryResponse(
+        total=total_progress,
+        okrugs=okrugs,
+        bottom_districts=bottom_districts,
+    )
+
+
+@app.get("/api/v1/leaderboard", response_model=LeaderboardResponse)
+async def get_leaderboard(
+    level: Literal["district", "okrug"] = Query(
+        "district", description="Aggregation level"),
+    period: Literal["week", "season"] = Query(
+        "week", description="Leaderboard period"),
+    limit: int = Query(10, ge=1, le=100, description="Number of entries to return"),
+    user=Depends(get_current_user),
+):
+    _ = user  # currently unused but validates auth
+
+    conn = db_module.get_connection()
+    total_cells, total_weight = db_module.get_total_cells_and_weight(conn, level=level)
+
+    if total_cells <= 0 and total_weight <= 0:
+        return LeaderboardResponse(
+            level=level,
+            period=period,
+            generated_at=datetime.now(timezone.utc),
+            entries=[],
+        )
+
+    rows = db_module.fetch_leaderboard(
+        conn,
+        level=level,
+        period=period,
+        limit=limit,
+    )
+
+    entries: List[LeaderboardEntry] = []
+    for idx, row in enumerate(rows, start=1):
+        visited_cells = int(row["visited_cells"] or 0)
+        visited_weight = float(row["visited_weight"] or 0.0)
+
+        percent_cells = 0.0
+        if total_cells > 0:
+            percent_cells = round((visited_cells / total_cells) * 100.0, 2)
+
+        percent_weight = 0.0
+        if total_weight > 0:
+            percent_weight = round((visited_weight / total_weight) * 100.0, 2)
+
+        entries.append(
+            LeaderboardEntry(
+                rank=idx,
+                user_id=int(row["user_id"]),
+                username=row["username"],
+                visited_cells=visited_cells,
+                visited_weight=visited_weight,
+                percent_cells=percent_cells,
+                percent_weight=percent_weight,
+            )
+        )
+
+    return LeaderboardResponse(
+        level=level,
+        period=period,
+        generated_at=datetime.now(timezone.utc),
+        entries=entries,
+    )
+
+
+
+001_districts.sql:
+-- Migration: Create districts table for Moscow okrugs and districts boundaries
+--
+-- This migration stores simplified geometries (as GeoJSON) alongside hierarchy
+-- and bounding boxes. Coverage statistics (H3-based) will be filled later.
+
+BEGIN TRANSACTION;
+
+CREATE TABLE IF NOT EXISTS districts (
+    id INTEGER PRIMARY KEY,
+    level TEXT CHECK(level IN ('okrug', 'district')) NOT NULL,
+    name_ru TEXT NOT NULL,
+    parent_id INTEGER,
+    geom_geojson TEXT NOT NULL,
+    bbox_min_lon REAL,
+    bbox_min_lat REAL,
+    bbox_max_lon REAL,
+    bbox_max_lat REAL,
+    total_cells INTEGER DEFAULT 0,
+    total_weight REAL DEFAULT 0.0,
+    FOREIGN KEY (parent_id) REFERENCES districts(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_districts_level ON districts(level);
+CREATE INDEX IF NOT EXISTS idx_districts_parent ON districts(parent_id);
+
+COMMIT;
+
+
+002_district_cells.sql:
+-- Migration: district_cells coverage table
+
+BEGIN TRANSACTION;
+
+CREATE TABLE IF NOT EXISTS district_cells (
+    district_id INTEGER NOT NULL,
+    h3 TEXT NOT NULL,
+    coverage REAL NOT NULL,
+    PRIMARY KEY (district_id, h3),
+    FOREIGN KEY (district_id) REFERENCES districts(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_h3 ON district_cells(h3);
+
+COMMIT;
+
+
+
+003_visits.sql:
+CREATE TABLE IF NOT EXISTS user_visits_atomic (
+    user_id INTEGER NOT NULL,
+    h3 TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    PRIMARY KEY (user_id, h3),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_district_stats (
+    user_id INTEGER NOT NULL,
+    district_id INTEGER NOT NULL,
+    visited_cells INTEGER NOT NULL DEFAULT 0,
+    visited_weight REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (user_id, district_id),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (district_id) REFERENCES districts(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_okrug_stats (
+    user_id INTEGER NOT NULL,
+    okrug_id INTEGER NOT NULL,
+    visited_cells INTEGER NOT NULL DEFAULT 0,
+    visited_weight REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (user_id, okrug_id),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (okrug_id) REFERENCES districts(id)
+);
+
+test_visits.py:
+import os
+import sqlite3
+import tempfile
+import unittest
+
+from app import db
+
+
+class VisitStatsTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "test.sqlite3")
+        os.environ["DB_PATH"] = self.db_path
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        db.init_db(self.conn)
+        self._ensure_geo_tables()
+        self._seed_districts()
+
+        self.user_id = db.ensure_user(self.conn, tg_id=1, username="user")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.tmpdir.cleanup()
+        os.environ.pop("DB_PATH", None)
+
+    def _ensure_geo_tables(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS districts (
+                id INTEGER PRIMARY KEY,
+                level TEXT NOT NULL,
+                name_ru TEXT NOT NULL,
+                parent_id INTEGER,
+                geom_geojson TEXT NOT NULL,
+                bbox_min_lon REAL,
+                bbox_min_lat REAL,
+                bbox_max_lon REAL,
+                bbox_max_lat REAL,
+                total_cells INTEGER DEFAULT 0,
+                total_weight REAL DEFAULT 0.0
+            );
+
+            CREATE TABLE IF NOT EXISTS district_cells (
+                district_id INTEGER NOT NULL,
+                h3 TEXT NOT NULL,
+                coverage REAL NOT NULL,
+                PRIMARY KEY (district_id, h3)
+            );
+            """
+        )
+
+    def _seed_districts(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO districts (
+                id, level, name_ru, parent_id,
+                geom_geojson,
+                bbox_min_lon, bbox_min_lat, bbox_max_lon, bbox_max_lat,
+                total_cells, total_weight
+            ) VALUES (?, 'okrug', ?, NULL, '{}', -1.0, -1.0, 1.0, 1.0, 1, 1.0)
+            """,
+            (10, "Test Okrug"),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO districts (
+                id, level, name_ru, parent_id,
+                geom_geojson,
+                bbox_min_lon, bbox_min_lat, bbox_max_lon, bbox_max_lat,
+                total_cells, total_weight
+            ) VALUES (?, 'district', ?, ?, '{}', -0.5, -0.5, 0.5, 0.5, 1, 1.1)
+            """,
+            (100, "Test District", 10),
+        )
+        self.conn.execute(
+            "INSERT INTO district_cells (district_id, h3, coverage) VALUES (?, ?, ?)",
+            (100, "866ffffffffffff", 0.8),
+        )
+        self.conn.execute(
+            "INSERT INTO district_cells (district_id, h3, coverage) VALUES (?, ?, ?)",
+            (100, "8663fffffffffff", 0.3),
+        )
+        self.conn.commit()
+
+    def test_fetch_districts_in_bbox_progress(self) -> None:
+        rows = db.fetch_districts_in_bbox(
+            self.conn,
+            user_id=self.user_id,
+            min_lon=-1.0,
+            min_lat=-1.0,
+            max_lon=1.0,
+            max_lat=1.0,
+            level="district",
+        )
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["id"], 100)
+        self.assertEqual(row["user_visited_cells"], 0)
+
+        db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="866ffffffffffff",
+            district_id=100,
+            coverage=0.8,
+            okrug_id=10,
+            now_ts=0,
+        )
+
+        rows = db.fetch_districts_in_bbox(
+            self.conn,
+            user_id=self.user_id,
+            min_lon=-1.0,
+            min_lat=-1.0,
+            max_lon=1.0,
+            max_lat=1.0,
+            level="district",
+        )
+        self.assertEqual(rows[0]["user_visited_cells"], 1)
+
+    def test_progress_summary_helpers(self) -> None:
+        db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="866ffffffffffff",
+            district_id=100,
+            coverage=0.8,
+            okrug_id=10,
+            now_ts=0,
+        )
+        totals = db.fetch_user_total_progress(self.conn, user_id=self.user_id)
+        self.assertEqual(totals["visited_cells"], 1)
+        self.assertEqual(totals["total_cells"], 1)
+
+        okrugs = db.fetch_user_okrug_progress(self.conn, user_id=self.user_id)
+        self.assertEqual(len(okrugs), 1)
+        okrug_row = okrugs[0]
+        self.assertEqual(okrug_row["visited_cells"], 1)
+        self.assertEqual(okrug_row["total_cells"], 1)
+
+        bottom = db.fetch_user_bottom_districts(self.conn, user_id=self.user_id, limit=3)
+        self.assertEqual(len(bottom), 1)
+        bottom_row = bottom[0]
+        self.assertEqual(bottom_row["id"], 100)
+        self.assertEqual(bottom_row["visited_cells"], 1)
+
+    def test_fetch_district_cells_and_visits(self) -> None:
+        cells = db.fetch_district_cells(self.conn, 100)
+        self.assertEqual(len(cells), 2)
+        visits = db.fetch_user_visited_cells_for_district(
+            self.conn, user_id=self.user_id, district_id=100
+        )
+        self.assertEqual(visits, [])
+
+        db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="866ffffffffffff",
+            district_id=100,
+            coverage=0.8,
+            okrug_id=10,
+            now_ts=0,
+        )
+
+        visits_after = db.fetch_user_visited_cells_for_district(
+            self.conn, user_id=self.user_id, district_id=100
+        )
+        self.assertEqual(visits_after, ["866ffffffffffff"])
+
+    def test_first_visit_updates_stats(self) -> None:
+        added = db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="866ffffffffffff",
+            district_id=100,
+            coverage=0.8,
+            okrug_id=10,
+            now_ts=0,
+        )
+        self.assertTrue(added)
+
+        stats = db.fetch_user_stats(self.conn, user_id=self.user_id, district_id=100, okrug_id=10)
+        self.assertEqual(stats["total_circles"], 1)
+        self.assertEqual(stats["district"]["visited_cells"], 1)
+        self.assertAlmostEqual(stats["district"]["visited_weight"], 0.8)
+        self.assertEqual(stats["okrug"]["visited_cells"], 1)
+        self.assertAlmostEqual(stats["okrug"]["visited_weight"], 0.8)
+
+    def test_second_visit_same_cell_ignored(self) -> None:
+        db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="866ffffffffffff",
+            district_id=100,
+            coverage=0.8,
+            okrug_id=10,
+            now_ts=0,
+        )
+        added = db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="866ffffffffffff",
+            district_id=100,
+            coverage=0.8,
+            okrug_id=10,
+            now_ts=1,
+        )
+        self.assertFalse(added)
+
+        stats = db.fetch_user_stats(self.conn, user_id=self.user_id, district_id=100, okrug_id=10)
+        self.assertEqual(stats["total_circles"], 1)
+        self.assertEqual(stats["district"]["visited_cells"], 1)
+        self.assertAlmostEqual(stats["district"]["visited_weight"], 0.8)
+
+    def test_low_coverage_counts_only_weight(self) -> None:
+        added = db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="8663fffffffffff",
+            district_id=100,
+            coverage=0.3,
+            okrug_id=10,
+            now_ts=2,
+        )
+        self.assertTrue(added)
+
+        stats = db.fetch_user_stats(self.conn, user_id=self.user_id, district_id=100, okrug_id=10)
+        self.assertEqual(stats["total_circles"], 1)
+        self.assertEqual(stats["district"]["visited_cells"], 0)
+        self.assertAlmostEqual(stats["district"]["visited_weight"], 0.3)
+
+    def test_delete_visit_updates_stats(self) -> None:
+        db.record_visit_and_increment_stats(
+            self.conn,
+            user_id=self.user_id,
+            h3_index="866ffffffffffff",
+            district_id=100,
+            coverage=0.8,
+            okrug_id=10,
+            now_ts=0,
+        )
+        deleted = db.delete_visit_by_hex(
+            self.conn, user_id=self.user_id, h3_index="866ffffffffffff"
+        )
+        self.assertEqual(deleted, 1)
+
+        stats = db.fetch_user_stats(self.conn, user_id=self.user_id, district_id=100, okrug_id=10)
+        self.assertEqual(stats["total_circles"], 0)
+        if stats["district"]:
+            self.assertEqual(stats["district"]["visited_cells"], 0)
+            self.assertAlmostEqual(stats["district"]["visited_weight"], 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+build_district_cells.py:
+#!/usr/bin/env python3
+"""Compute H3 coverage for Moscow districts and store in SQLite.
+
+This utility reads district geometries from GeoJSON, performs an H3 polyfill
+at the configured base resolution, estimates coverage of every hexagon within
+each district, and persists the results into the `district_cells` table. The
+script also updates aggregate statistics (`total_cells`, `total_weight`) in the
+`districts` table.
+
+Usage example:
+
+    python tools/build_district_cells.py \
+        --geojson /path/to/data/moscow_districts.geojson \
+        --database /path/to/db.sqlite3
+
+The script requires the `h3`, `shapely`, and `pyproj` packages.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, Iterator, List, Tuple
+
+from h3.api import basic_str as h3_basic
+from pyproj import Transformer
+from shapely import make_valid
+from shapely.geometry import MultiPolygon, Polygon, shape
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform
+
+
+LOG = logging.getLogger("build_district_cells")
+
+BASE_RESOLUTION = 9
+MIN_PRIMARY_COVERAGE = 0.5
+AREA_PROJECTION = "EPSG:32637"  # UTM zone 37N, covering Moscow region
+
+
+try:
+    MAKE_VALID = make_valid
+except Exception:  # pragma: no cover - fallback if shapely.make_valid missing
+    from shapely.validation import make_valid as MAKE_VALID  # type: ignore
+
+
+@dataclass
+class DistrictFeature:
+    district_id: int
+    name: str
+    geometry: MultiPolygon
+
+
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--geojson",
+        type=Path,
+        default=Path("data/moscow_districts.geojson"),
+        help="Path to the districts GeoJSON (default: data/moscow_districts.geojson).",
+    )
+    parser.add_argument(
+        "--database",
+        type=Path,
+        default=Path("db.sqlite3"),
+        help="Path to the SQLite database file (default: db.sqlite3).",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=BASE_RESOLUTION,
+        help="H3 resolution to use for polyfill (default: 10).",
+    )
+    parser.add_argument(
+        "--min-primary-coverage",
+        type=float,
+        default=MIN_PRIMARY_COVERAGE,
+        help="Threshold for counting a hex as a primary cell (default: 0.5).",
+    )
+    parser.add_argument(
+        "--recalculate-stats",
+        action="store_true",
+        help="Recalculate user stats after changing H3 resolution.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging verbosity (default: INFO).",
+    )
+    return parser.parse_args(argv)
+
+
+def ensure_multipolygon(geom: BaseGeometry) -> MultiPolygon:
+    geom = MAKE_VALID(geom)
+    if geom.is_empty:
+        return MultiPolygon()
+    if isinstance(geom, MultiPolygon):
+        return geom
+    if isinstance(geom, Polygon):
+        return MultiPolygon([geom])
+    if geom.geom_type == "GeometryCollection":
+        parts = [g for g in geom.geoms if g.geom_type in {"Polygon", "MultiPolygon"}]
+        if not parts:
+            return MultiPolygon()
+        union = parts[0]
+        for other in parts[1:]:
+            union = union.union(other)
+        return ensure_multipolygon(union)
+    raise ValueError(f"Unsupported geometry type: {geom.geom_type}")
+
+
+def load_district_features(path: Path) -> List[DistrictFeature]:
+    LOG.info("Loading districts from %s", path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    features: List[DistrictFeature] = []
+    for feature in data.get("features", []):
+        props: Dict = feature.get("properties", {})
+        if props.get("level") != "district":
+            continue
+        district_id = int(props["id"])
+        name = str(props.get("name_ru") or props.get("name") or district_id)
+        geom = ensure_multipolygon(shape(feature["geometry"]))
+        features.append(DistrictFeature(district_id, name, geom))
+    if not features:
+        raise RuntimeError("No district features found in GeoJSON")
+    LOG.info("Loaded %d district features", len(features))
+    return features
+
+
+def make_projector() -> Transformer:
+    return Transformer.from_crs("EPSG:4326", AREA_PROJECTION, always_xy=True)
+
+
+def project_geometry(geom: BaseGeometry, transformer: Transformer) -> BaseGeometry:
+    return transform(transformer.transform, geom)
+
+
+def cell_polygon(h3_index: str) -> Polygon:
+    boundary_latlon = h3_basic.cell_to_boundary(h3_index)
+    # H3 returns (lat, lon); shapely expects (lon, lat)
+    coords = [(lon, lat) for lat, lon in boundary_latlon]
+    if not coords:
+        raise ValueError(f"Empty boundary for cell {h3_index}")
+    # Ensure closure
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+    return Polygon(coords)
+
+
+def iter_cell_coverages(
+    district_proj: BaseGeometry,
+    h3_indexes: Iterable[str],
+    transformer: Transformer,
+) -> Iterator[Tuple[str, float]]:
+    for h3_index in h3_indexes:
+        cell_geom = cell_polygon(h3_index)
+        cell_proj = project_geometry(cell_geom, transformer)
+        cell_area = cell_proj.area
+        if cell_area <= 0:
+            LOG.debug("Skipping zero-area cell %s", h3_index)
+            continue
+        inter_area = cell_proj.intersection(district_proj).area
+        if inter_area <= 0:
+            continue
+        coverage = max(0.0, min(1.0, inter_area / cell_area))
+        yield h3_index, coverage
+
+
+def compute_coverages(
+    districts: List[DistrictFeature],
+    resolution: int,
+) -> Tuple[Dict[int, Dict[str, float]], Dict[int, str]]:
+    transformer = make_projector()
+    coverages: Dict[int, Dict[str, float]] = {}
+    district_names: Dict[int, str] = {}
+
+    for feature in districts:
+        LOG.debug("Polyfilling district %s (%d)", feature.name, feature.district_id)
+        geojson_mapping = json.loads(json.dumps(feature.geometry.__geo_interface__))
+        h3shape = h3_basic.geo_to_h3shape(geojson_mapping)
+        hexes = h3_basic.h3shape_to_cells(h3shape, resolution)
+        if not hexes:
+            LOG.warning("District %s (%d) produced no hexes", feature.name, feature.district_id)
+            coverages[feature.district_id] = {}
+            continue
+
+        district_proj = project_geometry(feature.geometry, transformer)
+        district_coverages: Dict[str, float] = {}
+        for h3_index, coverage in iter_cell_coverages(district_proj, hexes, transformer):
+            # Guarantee single row per district/cell as required
+            district_coverages[h3_index] = coverage
+        coverages[feature.district_id] = district_coverages
+        district_names[feature.district_id] = feature.name
+        LOG.debug(
+            "District %s (%d): %d cells (sum coverage %.2f)",
+            feature.name,
+            feature.district_id,
+            len(district_coverages),
+            sum(district_coverages.values()),
+        )
+
+    return coverages, district_names
+
+
+def persist_coverages(
+    conn: sqlite3.Connection,
+    coverages: Dict[int, Dict[str, float]],
+    district_names: Dict[int, str],
+    min_primary_coverage: float,
+) -> None:
+    LOG.info("Clearing existing district_cells data")
+    conn.execute("DELETE FROM district_cells")
+
+    insert_values: List[Tuple[int, str, float]] = []
+    aggregates: Dict[int, Tuple[int, float]] = {}
+
+    for district_id, cells in coverages.items():
+        if not cells:
+            aggregates[district_id] = (0, 0.0)
+            continue
+        total_cells = 0
+        total_weight = 0.0
+        for h3_index, coverage in cells.items():
+            insert_values.append((district_id, h3_index, coverage))
+            if coverage >= min_primary_coverage:
+                total_cells += 1
+            total_weight += coverage
+        aggregates[district_id] = (total_cells, total_weight)
+
+    LOG.info("Inserting %d district_cells rows", len(insert_values))
+    conn.executemany(
+        "INSERT INTO district_cells (district_id, h3, coverage) VALUES (?, ?, ?)",
+        insert_values,
+    )
+
+    LOG.info("Updating district aggregates")
+    for district_id, (total_cells, total_weight) in aggregates.items():
+        conn.execute(
+            "UPDATE districts SET total_cells = ?, total_weight = ? WHERE id = ?",
+            (total_cells, total_weight, district_id),
+        )
+
+    LOG.info("Validating coverage plausibility")
+    for district_id, (total_cells, total_weight) in aggregates.items():
+        if total_cells > 0 and total_weight <= total_cells * 0.6:
+            name = district_names.get(district_id, str(district_id))
+            LOG.warning(
+                "Suspicious coverage for %s (%d): total_weight %.3f <= 0.6 * total_cells %d",
+                name,
+                district_id,
+                total_weight,
+                total_cells,
+            )
+
+    conn.commit()
+
+
+def recalculate_user_stats(conn: sqlite3.Connection) -> None:
+    """
+    Recalculate user district and okrug stats based on existing visits.
+    This is needed when H3 resolution changes.
+    """
+    print("Recalculating user stats from visits...")
+
+    # Clear existing stats
+    conn.execute("DELETE FROM user_district_stats")
+    conn.execute("DELETE FROM user_okrug_stats")
+    conn.commit()
+
+    # Get all visits
+    cur = conn.execute("""
+        SELECT user_id, h3
+        FROM user_visits_atomic
+        ORDER BY user_id
+    """)
+    visits = cur.fetchall()
+
+    print(f"Processing {len(visits)} visits...")
+
+    for user_id, h3_index in visits:
+        # Find district for this H3 cell
+        district_row = conn.execute("""
+            SELECT district_id, coverage FROM district_cells
+            WHERE h3 = ?
+        """, (h3_index,)).fetchone()
+
+        if not district_row:
+            continue
+
+        district_id, cell_coverage = district_row
+        okrug_id = conn.execute("""
+            SELECT parent_id FROM districts WHERE id = ?
+        """, (district_id,)).fetchone()
+
+        if okrug_id:
+            okrug_id = okrug_id[0]
+        else:
+            okrug_id = None
+
+        # Update district stats
+        increment_cell = 1 if cell_coverage >= 0.5 else 0
+
+        conn.execute("""
+            INSERT INTO user_district_stats (user_id, district_id, visited_cells, visited_weight)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, district_id) DO UPDATE SET
+                visited_cells = visited_cells + ?,
+                visited_weight = visited_weight + ?
+        """, (user_id, district_id, increment_cell, cell_coverage, increment_cell, cell_coverage))
+
+        # Update okrug stats if applicable
+        if okrug_id is not None:
+            conn.execute("""
+                INSERT INTO user_okrug_stats (user_id, okrug_id, visited_cells, visited_weight)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, okrug_id) DO UPDATE SET
+                    visited_cells = visited_cells + ?,
+                    visited_weight = visited_weight + ?
+            """, (user_id, okrug_id, increment_cell, cell_coverage, increment_cell, cell_coverage))
+
+    conn.commit()
+    print("User stats recalculated.")
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(level=getattr(logging, args.log_level.upper()))
+
+    features = load_district_features(args.geojson)
+    coverages, district_names = compute_coverages(features, args.resolution)
+
+    conn = sqlite3.connect(args.database)
+    try:
+        persist_coverages(conn, coverages, district_names, args.min_primary_coverage)
+        if args.recalculate_stats:
+            recalculate_user_stats(conn)
+    finally:
+        conn.close()
+
+    LOG.info("Done. Processed %d districts", len(coverages))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+
+fetch_moscow_boundaries.py:
+#!/usr/bin/env python3
+"""Fetch Moscow administrative boundaries (okrugs and districts) from Overpass.
+
+This script downloads polygons for Moscow administrative okrugs and districts,
+simplifies their geometries for frontend usage, and stores them as GeoJSON
+files. It also records helper attributes such as bounding boxes and parent
+relationships (district → okrug).
+
+Usage example:
+
+    python tools/fetch_moscow_boundaries.py \
+        --output-dir data \
+        --simplify-tolerance-m 10
+
+The script relies on the public Overpass API and respects the recommended
+request rate limits. For bulk usage, consider running against a local Overpass
+instance.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import requests
+from osm2geojson import json2geojson
+from shapely import make_valid, prepared
+from shapely.geometry import MultiPolygon, shape
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform
+from shapely.validation import make_valid as make_valid_alias  # type: ignore[attr-defined]
+
+try:  # Shapely < 2.0 compatibility
+    MAKE_VALID = make_valid_alias  # type: ignore[assignment]
+except Exception:  # pragma: no cover - fallback for Shapely >= 2.0
+    MAKE_VALID = make_valid
+
+try:
+    from pyproj import CRS, Transformer
+except ModuleNotFoundError as exc:  # pragma: no cover - import guard
+    raise SystemExit(
+        "pyproj is required. Install dependencies via `pip install -r requirements.txt`."
+    ) from exc
+
+
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+DEFAULT_TOLERANCE_M = 10.0
+MOSCOW_OUT_OKRUGS = "moscow_okrugs.geojson"
+MOSCOW_OUT_DISTRICTS = "moscow_districts.geojson"
+MOSCOW_RELATION_ID = 102269
+
+
+MOSCOW_RELATION_QUERY = f"""
+[out:json][timeout:180];
+rel({MOSCOW_RELATION_ID});
+out geom;
+"""
+
+
+OKRUGS_QUERY_TEMPLATE = """
+[out:json][timeout:180];
+area["boundary"="administrative"]["name:ru"="Москва"]["admin_level"="4"]->.moscow;
+rel(area.moscow)["boundary"="administrative"]["admin_level"~"^(5|6)$"]["name:ru"~"(округ|АО)",i];
+out geom;
+"""
+
+
+DISTRICTS_QUERY_TEMPLATE = """
+[out:json][timeout:240];
+area["boundary"="administrative"]["name:ru"="Москва"]["admin_level"="4"]->.moscow;
+rel(area.moscow)["boundary"="administrative"]["admin_level"~"^(8|9)$"]["name:ru"~"(район|поселение)",i];
+out geom;
+"""
+
+
+LOG = logging.getLogger("fetch_moscow_boundaries")
+
+
+def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir",
+        default="data",
+        type=Path,
+        help="Directory where GeoJSON files will be written.",
+    )
+    parser.add_argument(
+        "--simplify-tolerance-m",
+        type=float,
+        default=DEFAULT_TOLERANCE_M,
+        help="Simplification tolerance in meters (Web Mercator).",
+    )
+    parser.add_argument(
+        "--overpass-url",
+        default=OVERPASS_URL,
+        help="Custom Overpass API endpoint.",
+    )
+    parser.add_argument(
+        "--sleep-after-request",
+        type=float,
+        default=2.0,
+        help="Seconds to sleep after each Overpass request to be polite.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose logging.",
+    )
+    return parser.parse_args(argv)
+
+
+def fetch_overpass(url: str, query: str) -> Dict:
+    LOG.info("Overpass request: %.60s...", " ".join(query.split()))
+    resp = requests.post(url, data={"data": query}, timeout=300)
+    resp.raise_for_status()
+    data = resp.json()
+    if "elements" not in data:
+        raise RuntimeError("Unexpected Overpass response format")
+    return data
+
+
+def to_geojson_features(osm_json: Dict) -> List[Dict]:
+    # Use osm2geojson but preserve tags for name extraction
+    geojson = json2geojson(osm_json)
+    features: List[Dict] = []
+    for original, converted in zip(osm_json.get("elements", []), geojson.get("features", [])):
+        tags = original.get("tags", {})
+        converted.setdefault("properties", {}).setdefault("_raw_tags", tags)
+        features.append(converted)
+    LOG.debug("Converted to %d GeoJSON features", len(features))
+    return features
+
+
+def init_transformers() -> Tuple[Transformer, Transformer]:
+    wgs84 = CRS.from_epsg(4326)
+    web_mercator = CRS.from_epsg(3857)
+    forward = Transformer.from_crs(wgs84, web_mercator, always_xy=True)
+    backward = Transformer.from_crs(web_mercator, wgs84, always_xy=True)
+    return forward, backward
+
+
+def simplify_geometry(geom: BaseGeometry, tolerance_m: float, transformers: Tuple[Transformer, Transformer]) -> BaseGeometry:
+    if tolerance_m <= 0:
+        return geom
+    forward, backward = transformers
+    projected = transform(forward.transform, geom)
+    simplified = projected.simplify(tolerance_m, preserve_topology=True)
+    return transform(backward.transform, simplified)
+
+
+def ensure_multipolygon(geom: BaseGeometry) -> MultiPolygon:
+    from shapely.geometry import MultiPolygon as MP, Polygon
+
+    geom = MAKE_VALID(geom)
+    if geom.is_empty:
+        return MP()
+    if isinstance(geom, MP):
+        return geom
+    if isinstance(geom, Polygon):  # type: ignore[name-defined]
+        return MP([geom])
+    if geom.geom_type == "GeometryCollection":
+        polys = [g for g in geom.geoms if g.geom_type in {"Polygon", "MultiPolygon"}]
+        if not polys:
+            return MP()
+        union = polys[0]
+        for other in polys[1:]:
+            union = union.union(other)
+        return ensure_multipolygon(union)
+    raise ValueError(f"Unsupported geometry type: {geom.geom_type}")
+
+
+def extract_name(feature: Dict) -> str:
+    props = feature.get("properties", {})
+    tags = props.get("_raw_tags", {})
+    for key in ("name:ru", "name", "official_name:ru", "official_name"):
+        if props.get(key):
+            return str(props[key])
+        if tags.get(key):
+            return str(tags[key])
+    raise ValueError("Feature without a usable name")
+
+
+def clip_to_moscow(geom: BaseGeometry, moscow_geom: BaseGeometry) -> BaseGeometry:
+    if moscow_geom.is_empty:
+        return geom
+    if geom.within(moscow_geom):
+        return geom
+    clipped = geom.intersection(moscow_geom)
+    return clipped if not clipped.is_empty else geom
+
+
+def build_feature_entry(
+    osm_id: int,
+    level: str,
+    name_ru: str,
+    geom: MultiPolygon,
+    parent_id: Optional[int],
+) -> Dict:
+    minx, miny, maxx, maxy = geom.bounds
+    return {
+        "type": "Feature",
+        "properties": {
+            "id": osm_id,
+            "level": level,
+            "name_ru": name_ru,
+            "parent_id": parent_id,
+            "bbox": [minx, miny, maxx, maxy],
+        },
+        "geometry": json.loads(json.dumps(geom.__geo_interface__)),
+    }
+
+
+def assemble_boundary_catalog(
+    okrug_features: List[Dict],
+    district_features: List[Dict],
+    moscow_geom: BaseGeometry,
+    tolerance_m: float,
+) -> Tuple[List[Dict], List[Dict]]:
+    transformers = init_transformers()
+
+    okrugs: List[Dict] = []
+    okrug_geoms: Dict[int, BaseGeometry] = {}
+    for feature in okrug_features:
+        osm_id = int(feature["properties"]["id"])
+        geom = ensure_multipolygon(shape(feature["geometry"]))
+        geom = clip_to_moscow(geom, moscow_geom)
+        geom = simplify_geometry(geom, tolerance_m, transformers)
+        geom = ensure_multipolygon(geom)
+        name_ru = extract_name(feature)
+        okrugs.append(build_feature_entry(osm_id, "okrug", name_ru, geom, None))
+        okrug_geoms[osm_id] = prepared.prep(geom)
+
+    districts: List[Dict] = []
+    for feature in district_features:
+        osm_id = int(feature["properties"]["id"])
+        geom = ensure_multipolygon(shape(feature["geometry"]))
+        geom = clip_to_moscow(geom, moscow_geom)
+        geom = simplify_geometry(geom, tolerance_m, transformers)
+        geom = ensure_multipolygon(geom)
+        name_ru = extract_name(feature)
+
+        centroid = geom.representative_point()
+        parent_id: Optional[int] = None
+        for okrug_id, prepared_geom in okrug_geoms.items():
+            if prepared_geom.contains(centroid):
+                parent_id = okrug_id
+                break
+
+        districts.append(build_feature_entry(osm_id, "district", name_ru, geom, parent_id))
+
+    return okrugs, districts
+
+
+def combine_moscow_geometry(features: List[Dict]) -> BaseGeometry:
+    if not features:
+        raise RuntimeError("Failed to fetch Moscow boundary")
+    geom = ensure_multipolygon(shape(features[0]["geometry"]))
+    return geom
+
+
+def dump_geojson(path: Path, features: List[Dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    collection = {"type": "FeatureCollection", "features": features}
+    path.write_text(json.dumps(collection, ensure_ascii=False, indent=2), encoding="utf-8")
+    LOG.info("Wrote %s (%d features)", path, len(features))
+
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+
+    LOG.info("Fetching Moscow boundary...")
+    moscow_raw = fetch_overpass(args.overpass_url, MOSCOW_RELATION_QUERY)
+    moscow_features = to_geojson_features(moscow_raw)
+    moscow_geom = combine_moscow_geometry(moscow_features)
+
+    LOG.info("Fetching okrugs...")
+    okrugs_raw = fetch_overpass(args.overpass_url, OKRUGS_QUERY_TEMPLATE)
+    time.sleep(args.sleep_after_request)
+    okrug_features = to_geojson_features(okrugs_raw)
+
+    LOG.info("Fetching districts...")
+    districts_raw = fetch_overpass(args.overpass_url, DISTRICTS_QUERY_TEMPLATE)
+    time.sleep(args.sleep_after_request)
+    district_features = to_geojson_features(districts_raw)
+
+    LOG.info(
+        "Fetched %d okrug candidates and %d district candidates",
+        len(okrug_features),
+        len(district_features),
+    )
+
+    okrugs, districts = assemble_boundary_catalog(
+        okrug_features, district_features, moscow_geom, args.simplify_tolerance_m
+    )
+
+    okrug_path = args.output_dir / MOSCOW_OUT_OKRUGS
+    district_path = args.output_dir / MOSCOW_OUT_DISTRICTS
+
+    dump_geojson(okrug_path, okrugs)
+    dump_geojson(district_path, districts)
+
+    LOG.info("Completed. Okrugs: %d, districts: %d", len(okrugs), len(districts))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:  # pragma: no cover - user interruption
+        LOG.warning("Interrupted by user")
+        sys.exit(130)
+
+
+app.js:
+(async function () {
+  const tg =
+    window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg) {
+    try {
+      tg.ready();
+    } catch (_) {}
+  }
+
+  async function getDebugSettings() {
+    try {
+      const response = await fetch("/api/v1/debug-mode");
+      if (!response.ok) return { noAuthMode: false, debugAuthMode: false };
+      const data = await response.json();
+      return {
+        noAuthMode: !!data.no_auth_mode,
+        debugAuthMode: !!data.debug_auth_mode,
+        baseVisitResolution:
+          typeof data.base_visit_resolution === "number"
+            ? data.base_visit_resolution
+            : undefined,
+      };
+    } catch (error) {
+      console.warn("[auth] Failed to check debug mode:", error);
+      return { noAuthMode: false, debugAuthMode: false };
+    }
+  }
+
+  const hasInitData = !!(tg && tg.initData);
+  const { noAuthMode, debugAuthMode, baseVisitResolution } =
+    await getDebugSettings();
+
+  if (!hasInitData && !noAuthMode) {
+    document.getElementById("app").innerHTML = `
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; font-family: sans-serif; color: #ccc;">
+        <h2 style="margin: 0; color: #eee;">Oops!</h2>
+        <p style="margin: 8px 0 0;">Could not initialize the application.<br>Please make sure you are running this inside Telegram.</p>
+      </div>
+    `;
+    return;
+  }
+
+  // --- UI & Config ---
+  const openBtn = document.getElementById("openBtn");
+  const leaderboardBtn = document.getElementById("leaderboardBtn");
+  const leaderboardOverlay = document.getElementById("leaderboard-overlay");
+  const leaderboardCloseBtn = document.getElementById("leaderboardCloseBtn");
+  const leaderboardLevelSelect = document.getElementById("leaderboardLevel");
+  const leaderboardPeriodSelect = document.getElementById("leaderboardPeriod");
+  const leaderboardStatus = document.getElementById("leaderboardStatus");
+  const leaderboardBody = document.getElementById("leaderboardBody");
+  const toggleFogBtn = document.getElementById("toggleFogBtn");
+  const countEl = document.getElementById("count");
+  const statusEl = document.getElementById("status");
+  const fogCanvas = document.getElementById("fog-canvas");
+  const fogCtx = fogCanvas.getContext("2d");
+  const DPR = window.devicePixelRatio || 1;
+
+  const FOG_CONFIG = {
+    shadowBlur: 55,
+    revealBlur: 40,
+    pulseAmplitude: 0.04,
+    animationSpeed: 0.0015,
+  };
+
+  // --- Map Initialization ---
+  const map = new maplibregl.Map({
+    container: "map",
+    style:
+      "https://api.maptiler.com/maps/pastel/style.json?key=TFV5uV6DVVucu16gTZdi",
+    center: [37.6173, 55.7558],
+    zoom: 12,
+    maxBounds: [
+      [36.0, 55.0],
+      [39.0, 56.5],
+    ],
+  });
+  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+  const geolocate = new maplibregl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true },
+    trackUserLocation: false,
+    showUserHeading: true,
+    showAccuracyCircle: false,
+    fitBoundsOptions: { maxZoom: 22 },
+  });
+  try {
+    if (geolocate && geolocate._updateCamera) {
+      geolocate._updateCamera = function () {};
+    }
+  } catch (_) {}
+  map.addControl(geolocate);
+
+  // --- Application State ---
+  const allKnownHexagons = new Set();
+  let isFetching = false;
+  let fogEnabled = true;
+  let animationTime = 0;
+  const defaultVisitResolution =
+    baseVisitResolution || window.__CITY_FOG_BASE_RESOLUTION__ || 8;
+  const BASE_DISTRICT_RESOLUTION = defaultVisitResolution;
+  window.currentH3Resolution = defaultVisitResolution;
+  let ignoreNextClick = false;
+  const emptyFeatureCollection = { type: "FeatureCollection", features: [] };
+  const ADMIN_FETCH_DEBOUNCE_MS = 360;
+  const ADMIN_FETCH_IDLE_MS = 120;
+  let adminUpdateTimer = null;
+  let adminRequestSeq = 0;
+  let adminFetchAbortController = null;
+  let selectedDistrictId = null;
+  let selectedDistrictName = "";
+  let selectedDistrictFeature = null;
+  let selectedDistrictAbortController = null;
+  let selectedDistrictResView = null;
+  const DEFAULT_STATUS_TEXT = "Select a district";
+  const districtFeatureMap = new Map();
+  const okrugFeatureMap = new Map();
+  const districtCellsCache = new Map();
+  let statusOverrideMessage = null;
+
+  // --- NEW: Spatial Index for Hexagons ---
+  const spatialIndex = new Map();
+  const GRID_SIZE = 0.25; // Size of the grid cell in degrees. Tune if needed.
+
+  function getGridKey(lat, lng) {
+    const gridX = Math.floor(lng / GRID_SIZE);
+    const gridY = Math.floor(lat / GRID_SIZE);
+    return `${gridX}_${gridY}`;
+  }
+
+  function addToSpatialIndex(hexId) {
+    if (!hexId) return;
+    try {
+      const [lat, lng] = h3.cellToLatLng(hexId);
+      const key = getGridKey(lat, lng);
+      if (!spatialIndex.has(key)) {
+        spatialIndex.set(key, new Set());
+      }
+      spatialIndex.get(key).add(hexId);
+    } catch (e) {
+      console.warn(`Failed to add hex ${hexId} to spatial index`, e);
+    }
+  }
+
+  function removeFromSpatialIndex(hexId) {
+    if (!hexId) return;
+    try {
+      const [lat, lng] = h3.cellToLatLng(hexId);
+      const key = getGridKey(lat, lng);
+      if (spatialIndex.has(key)) {
+        spatialIndex.get(key).delete(hexId);
+        if (spatialIndex.get(key).size === 0) {
+          spatialIndex.delete(key);
+        }
+      }
+    } catch (e) {
+      console.warn(`Failed to remove hex ${hexId} from spatial index`, e);
+    }
+  }
+  // --- END: Spatial Index ---
+
+  const leaderboardState = {
+    isOpen: false,
+    level: "district",
+    period: "week",
+    entries: [],
+    loading: false,
+    error: null,
+  };
+  let leaderboardAbortController = null;
+
+  function showLeaderboard() {
+    if (!leaderboardOverlay) return;
+    leaderboardOverlay.classList.add("visible");
+    leaderboardState.isOpen = true;
+    leaderboardStatus.textContent = "";
+    fetchLeaderboard();
+  }
+
+  function hideLeaderboard() {
+    if (!leaderboardOverlay) return;
+    leaderboardOverlay.classList.remove("visible");
+    leaderboardState.isOpen = false;
+    if (leaderboardAbortController) {
+      leaderboardAbortController.abort();
+      leaderboardAbortController = null;
+    }
+  }
+
+  function renderLeaderboard(entries) {
+    if (!leaderboardBody) return;
+    leaderboardBody.innerHTML = "";
+    if (!Array.isArray(entries) || entries.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 6;
+      cell.textContent = "No data yet. Explore the city to be the first!";
+      cell.style.textAlign = "center";
+      cell.style.padding = "20px";
+      row.appendChild(cell);
+      leaderboardBody.appendChild(row);
+      return;
+    }
+
+    entries.forEach((entry) => {
+      const row = document.createElement("tr");
+
+      const rankCell = document.createElement("td");
+      rankCell.textContent = entry.rank ?? "-";
+      rankCell.className = "rank";
+      row.appendChild(rankCell);
+
+      const userCell = document.createElement("td");
+      userCell.textContent = entry.username || `User ${entry.user_id ?? ""}`;
+      userCell.className = "username";
+      row.appendChild(userCell);
+
+      const cellsCell = document.createElement("td");
+      cellsCell.textContent =
+        typeof entry.visited_cells === "number"
+          ? entry.visited_cells.toLocaleString("ru-RU")
+          : "-";
+      row.appendChild(cellsCell);
+
+      const weightCell = document.createElement("td");
+      weightCell.textContent =
+        typeof entry.visited_weight === "number"
+          ? entry.visited_weight.toFixed(2)
+          : "-";
+      row.appendChild(weightCell);
+
+      const percentCellsCell = document.createElement("td");
+      percentCellsCell.textContent =
+        typeof entry.percent_cells === "number"
+          ? `${safeRound(entry.percent_cells)}%`
+          : "-";
+      row.appendChild(percentCellsCell);
+
+      const percentWeightCell = document.createElement("td");
+      percentWeightCell.textContent =
+        typeof entry.percent_weight === "number"
+          ? `${safeRound(entry.percent_weight)}%`
+          : "-";
+      row.appendChild(percentWeightCell);
+
+      leaderboardBody.appendChild(row);
+    });
+  }
+
+  function setLeaderboardLoading(isLoading) {
+    leaderboardState.loading = isLoading;
+    if (leaderboardStatus) {
+      leaderboardStatus.textContent = isLoading
+        ? "Loading…"
+        : leaderboardState.error || "";
+      leaderboardStatus.style.color = leaderboardState.error
+        ? "#f87171"
+        : "inherit";
+    }
+  }
+
+  async function fetchLeaderboard() {
+    if (!leaderboardState.isOpen) return;
+
+    if (leaderboardAbortController) {
+      leaderboardAbortController.abort();
+    }
+    const controller = new AbortController();
+    leaderboardAbortController = controller;
+
+    setLeaderboardLoading(true);
+    leaderboardState.error = null;
+
+    const params = new URLSearchParams({
+      level: leaderboardState.level,
+      period: leaderboardState.period,
+    });
+
+    try {
+      const response = await fetch(`/api/v1/leaderboard?${params.toString()}`, {
+        signal: controller.signal,
+        headers: getAuthHeaders({ Accept: "application/json" }),
+      });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      if (!controller.signal.aborted) {
+        leaderboardState.entries = Array.isArray(payload?.entries)
+          ? payload.entries
+          : [];
+        renderLeaderboard(leaderboardState.entries);
+        setLeaderboardLoading(false);
+      }
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      console.warn("[leaderboard] Failed to fetch leaderboard:", error);
+      leaderboardState.error = "Unable to load leaderboard.";
+      renderLeaderboard([]);
+      setLeaderboardLoading(false);
+    }
+  }
+
+  function handleLeaderboardLevelChange(event) {
+    const value = event?.target?.value;
+    if (!value || !["district", "okrug"].includes(value)) return;
+    leaderboardState.level = value;
+    fetchLeaderboard();
+  }
+
+  function handleLeaderboardPeriodChange(event) {
+    const value = event?.target?.value;
+    if (!value || !["week", "season"].includes(value)) return;
+    leaderboardState.period = value;
+    fetchLeaderboard();
+  }
+
+  function handleLeaderboardKey(event) {
+    if (event.key === "Escape" && leaderboardState.isOpen) {
+      hideLeaderboard();
+    }
+  }
+
+  const ADMIN_SOURCES = {
+    districts: "admin-districts",
+    okrugs: "admin-okrugs",
+    selected: "selected-district",
+    districtHex: "district-hex-grid",
+  };
+
+  const ADMIN_LAYERS = {
+    districtFill: "district-fill",
+    districtBorders: "district-borders",
+    districtLabels: "district-labels",
+    districtHitArea: "district-hit-area",
+    okrugBorders: "okrug-borders",
+    okrugFill: "okrug-fill",
+    selectedFill: "selected-district-fill",
+    selectedOutline: "selected-district-outline",
+    hexFill: "selected-district-hex-fill",
+    hexOutline: "selected-district-hex-outline",
+  };
+
+  function getAuthHeaders(custom = {}) {
+    const headers = { ...custom };
+    if (tg && tg.initData) {
+      headers["X-Telegram-Init"] = tg.initData;
+    }
+    if (typeof window.currentH3Resolution === "number") {
+      headers["X-H3-Resolution"] = String(window.currentH3Resolution);
+    }
+    return headers;
+  }
+
+  function cloneFeature(feature) {
+    if (!feature) return null;
+    try {
+      return JSON.parse(JSON.stringify(feature));
+    } catch (err) {
+      console.warn("[admin] Failed to clone feature", err);
+      return null;
+    }
+  }
+
+  function safeRound(value) {
+    return Math.max(0, Math.round(value));
+  }
+
+  function formatProgressSuffix(feature) {
+    const props = feature?.properties;
+    if (!props) return null;
+
+    const cells = props.percent_cells;
+    const weight = props.percent_weight;
+    const cellsLabel =
+      typeof cells === "number" && !Number.isNaN(cells)
+        ? `${safeRound(cells)}%`
+        : null;
+
+    if (cellsLabel) return cellsLabel;
+
+    const weightLabel =
+      typeof weight === "number" && !Number.isNaN(weight)
+        ? `${safeRound(weight)}% weight`
+        : null;
+
+    return weightLabel;
+  }
+
+  function ensureAdminSourcesAndLayers() {
+    if (!map.getSource(ADMIN_SOURCES.okrugs)) {
+      map.addSource(ADMIN_SOURCES.okrugs, {
+        type: "geojson",
+        data: emptyFeatureCollection,
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.okrugFill)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.okrugFill,
+        type: "fill",
+        source: ADMIN_SOURCES.okrugs,
+        paint: {
+          "fill-color": "#0ea5e9",
+          "fill-opacity": 0.05,
+        },
+        maxzoom: 12,
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.okrugBorders)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.okrugBorders,
+        type: "line",
+        source: ADMIN_SOURCES.okrugs,
+        paint: {
+          "line-color": "#0f172a",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 3.5, 14, 4.5],
+          "line-dasharray": [3, 2],
+          "line-opacity": 0.9,
+        },
+      });
+    }
+
+    if (!map.getSource(ADMIN_SOURCES.districts)) {
+      map.addSource(ADMIN_SOURCES.districts, {
+        type: "geojson",
+        data: emptyFeatureCollection,
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.districtFill)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.districtFill,
+        type: "fill",
+        source: ADMIN_SOURCES.districts,
+        paint: {
+          "fill-color": "#38bdf8",
+          "fill-opacity": 0.08,
+        },
+        maxzoom: 12,
+        layout: {
+          visibility: "visible",
+        },
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.districtHitArea)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.districtHitArea,
+        type: "fill",
+        source: ADMIN_SOURCES.districts,
+        paint: {
+          "fill-opacity": 0,
+        },
+        filter: ["==", ["get", "level"], "district"],
+      });
+    }
+
+    // --- UPDATED: NATIVE MAPLIBRE LABELS ---
+    if (!map.getLayer(ADMIN_LAYERS.districtLabels)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.districtLabels,
+        type: "symbol",
+        source: ADMIN_SOURCES.districts,
+        minzoom: 11.5,
+        layout: {
+          "visibility": "visible",
+          "text-field": [
+            "format",
+            ["get", "name"],
+            { "font-scale": 1.0, "text-font": ["literal", ["Inter Bold", "Arial Unicode MS Bold"]] },
+            "\n",
+            {},
+            [
+              "case",
+              ["has", "overlay_suffix"],
+              ["get", "overlay_suffix"],
+              "",
+            ],
+            { "font-scale": 0.85, "text-font": ["literal", ["Inter Regular", "Arial Unicode MS Regular"]] },
+          ],
+          "text-size": 13,
+          "text-allow-overlap": false,
+          "text-ignore-placement": false,
+        },
+        paint: {
+          "text-color": "#f8fafc",
+          "text-halo-color": "#1e293b",
+          "text-halo-width": 1.5,
+          "text-halo-blur": 1,
+        },
+      });
+    }
+    // --- END UPDATED ---
+
+    if (!map.getLayer(ADMIN_LAYERS.districtBorders)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.districtBorders,
+        type: "line",
+        source: ADMIN_SOURCES.districts,
+        paint: {
+          "line-color": "#1f2937",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2.5, 14, 3.5],
+          "line-blur": 0.5,
+          "line-opacity": 0.95,
+        },
+      });
+    }
+
+    if (!map.getSource(ADMIN_SOURCES.selected)) {
+      map.addSource(ADMIN_SOURCES.selected, {
+        type: "geojson",
+        data: emptyFeatureCollection,
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.selectedFill)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.selectedFill,
+        type: "fill",
+        source: ADMIN_SOURCES.selected,
+        paint: {
+          "fill-color": "#f97316",
+          "fill-opacity": 0.12,
+        },
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.selectedOutline)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.selectedOutline,
+        type: "line",
+        source: ADMIN_SOURCES.selected,
+        paint: {
+          "line-color": "#fb923c",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 3.2, 14, 5],
+          "line-opacity": 0.9,
+        },
+      });
+    }
+
+    if (!map.getSource(ADMIN_SOURCES.districtHex)) {
+      map.addSource(ADMIN_SOURCES.districtHex, {
+        type: "geojson",
+        data: emptyFeatureCollection,
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.hexFill)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.hexFill,
+        type: "fill",
+        source: ADMIN_SOURCES.districtHex,
+        paint: {
+          "fill-color": [
+            "case",
+            ["boolean", ["get", "visited"], false],
+            "#22c55e",
+            "#94a3b8",
+          ],
+          "fill-opacity": [
+            "case",
+            ["boolean", ["get", "visited"], false],
+            0.55,
+            [
+              "interpolate",
+              ["linear"],
+              ["coalesce", ["get", "coverage"], 0],
+              0,
+              0.06,
+              1,
+              0.35,
+            ],
+          ],
+        },
+      });
+    }
+
+    if (!map.getLayer(ADMIN_LAYERS.hexOutline)) {
+      map.addLayer({
+        id: ADMIN_LAYERS.hexOutline,
+        type: "line",
+        source: ADMIN_SOURCES.districtHex,
+        paint: {
+          "line-color": "#1f2937",
+          "line-width": 0.65,
+          "line-opacity": 0.5,
+        },
+      });
+    }
+  }
+
+  function toFeatureCollection(features = []) {
+    return { type: "FeatureCollection", features };
+  }
+
+  function calculateFeatureAreaKm2(feature) {
+    if (!feature?.geometry) return null;
+    try {
+      const areaSqMeters = turf.area(feature);
+      if (typeof areaSqMeters !== "number" || Number.isNaN(areaSqMeters)) {
+        return null;
+      }
+      return areaSqMeters / 1_000_000;
+    } catch (err) {
+      console.warn("[area] Failed to compute feature area", err);
+      return null;
+    }
+  }
+
+  function pickResByArea(areaKm2) {
+    if (typeof areaKm2 !== "number" || Number.isNaN(areaKm2)) {
+      return BASE_DISTRICT_RESOLUTION;
+    }
+    if (areaKm2 >= 3) {
+      return Math.max(0, BASE_DISTRICT_RESOLUTION - 1);
+    }
+    return BASE_DISTRICT_RESOLUTION;
+  }
+
+  function getFeatureAreaKm2(feature) {
+    if (!feature) return null;
+    const stored = feature?.properties?.area_km2;
+    if (typeof stored === "number" && !Number.isNaN(stored)) {
+      return stored;
+    }
+    const computed = calculateFeatureAreaKm2(feature);
+    if (feature?.properties) {
+      feature.properties.area_km2 = computed;
+    }
+    return computed;
+  }
+
+  function mapDistrictApiFeature(raw) {
+    if (!raw || !raw.geom) return null;
+    const percentCells =
+      raw.progress?.percent_cells ?? raw.progress?.percent ?? 0;
+    const percentWeight = raw.progress?.percent_weight ?? 0;
+    const feature = {
+      type: "Feature",
+      geometry: raw.geom,
+      properties: {
+        id: raw.id,
+        name: raw.name,
+        level: raw.level,
+        parent_id: raw.parent_id,
+        percent_cells: percentCells,
+        percent_weight: percentWeight,
+        visited_cells: raw.progress?.visited_cells ?? 0,
+        total_cells: raw.progress?.total_cells ?? 0,
+        visited_weight: raw.progress?.visited_weight ?? 0,
+        total_weight: raw.progress?.total_weight ?? 0,
+        bbox: raw.bbox ?? null,
+      },
+    };
+    return feature;
+  }
+
+  function refreshAdminLayers() {
+    if (!map || !map.isStyleLoaded()) return;
+    ensureAdminSourcesAndLayers();
+
+    if (adminFetchAbortController) {
+      adminFetchAbortController.abort();
+    }
+
+    const bounds = map.getBounds();
+    const bbox = [
+      bounds.getWest(),
+      bounds.getSouth(),
+      bounds.getEast(),
+      bounds.getNorth(),
+    ].join(",");
+
+    const controller = new AbortController();
+    adminFetchAbortController = controller;
+    const currentSeq = ++adminRequestSeq;
+    const requestOptions = {
+      signal: controller.signal,
+      headers: getAuthHeaders({ Accept: "application/json" }),
+    };
+
+    const okrugPromise = fetch(
+      `/api/v1/districts?bbox=${bbox}&level=okrug`,
+      requestOptions,
+    );
+    const districtPromise = fetch(
+      `/api/v1/districts?bbox=${bbox}&level=district`,
+      requestOptions,
+    );
+
+    Promise.all([okrugPromise, districtPromise])
+      .then(async ([okrugRes, districtRes]) => {
+        if (controller.signal.aborted) return;
+        if (!okrugRes.ok)
+          throw new Error(`okrug fetch failed: ${okrugRes.status}`);
+        if (!districtRes.ok)
+          throw new Error(`district fetch failed: ${districtRes.status}`);
+
+        const [okrugData, districtData] = await Promise.all([
+          okrugRes.json(),
+          districtRes.json(),
+        ]);
+
+        if (controller.signal.aborted || currentSeq !== adminRequestSeq) return;
+
+        const okrugFeatures = [];
+        okrugFeatureMap.clear();
+        okrugData.forEach((raw) => {
+          const feature = mapDistrictApiFeature(raw);
+          if (feature) {
+            okrugFeatures.push(feature);
+            okrugFeatureMap.set(raw.id, feature);
+          }
+        });
+
+        const districtFeatures = [];
+        districtFeatureMap.clear();
+        districtData.forEach((raw) => {
+          const feature = mapDistrictApiFeature(raw);
+          if (feature) {
+            getFeatureAreaKm2(feature); // Pre-calculate area
+            feature.properties.overlay_suffix = formatProgressSuffix(feature);
+            districtFeatures.push(feature);
+            districtFeatureMap.set(raw.id, feature);
+          }
+        });
+
+        const okrugSource = map.getSource(ADMIN_SOURCES.okrugs);
+        if (okrugSource) {
+          okrugSource.setData(toFeatureCollection(okrugFeatures));
+        }
+
+        const districtSource = map.getSource(ADMIN_SOURCES.districts);
+        if (districtSource) {
+          districtSource.setData(toFeatureCollection(districtFeatures));
+        }
+
+        if (selectedDistrictId != null) {
+          const updatedFeature = districtFeatureMap.get(selectedDistrictId);
+          if (updatedFeature) {
+            selectedDistrictFeature = cloneFeature(updatedFeature);
+            selectedDistrictName =
+              selectedDistrictFeature.properties?.name || selectedDistrictName;
+            updateSelectedDistrictHighlight();
+            updateStatusForSelection();
+          } else {
+            clearDistrictSelection();
+            updateDistrictHexLayer(emptyFeatureCollection);
+            if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
+          }
+        } else if (!statusOverrideMessage) {
+          setStatus(DEFAULT_STATUS_TEXT);
+        }
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        console.warn("[admin] Failed to refresh admin layers:", error);
+      })
+      .finally(() => {
+        if (controller === adminFetchAbortController) {
+          adminFetchAbortController = null;
+        }
+      });
+  }
+
+  function scheduleAdminRefresh(isMapMoving = false) {
+    if (adminUpdateTimer) {
+      clearTimeout(adminUpdateTimer);
+      adminUpdateTimer = null;
+    }
+    const delay = isMapMoving ? ADMIN_FETCH_IDLE_MS : ADMIN_FETCH_DEBOUNCE_MS;
+    adminUpdateTimer = setTimeout(() => {
+      adminUpdateTimer = null;
+      refreshAdminLayers();
+    }, delay);
+  }
+
+  function updateSelectedDistrictHighlight() {
+    const selectedSource = map.getSource(ADMIN_SOURCES.selected);
+    if (!selectedSource) return;
+    if (selectedDistrictFeature) {
+      selectedSource.setData(toFeatureCollection([selectedDistrictFeature]));
+    } else {
+      selectedSource.setData(emptyFeatureCollection);
+    }
+  }
+
+  function updateStatusForSelection() {
+    if (!selectedDistrictId || !selectedDistrictFeature) {
+      if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
+      return;
+    }
+    const suffix = formatProgressSuffix(selectedDistrictFeature);
+    const label = suffix
+      ? `${selectedDistrictName} • ${suffix}`
+      : selectedDistrictName;
+    setStatus(label || DEFAULT_STATUS_TEXT);
+  }
+
+  function handleDistrictSelection(feature) {
+    if (!feature || !feature.properties) return;
+    const districtId = Number(feature.properties.id);
+    if (!Number.isFinite(districtId)) return;
+    if (selectedDistrictId === districtId) {
+      clearDistrictSelection();
+      return;
+    }
+
+    selectedDistrictId = districtId;
+    selectedDistrictFeature = cloneFeature(
+      districtFeatureMap.get(districtId) || feature,
+    );
+    selectedDistrictName =
+      selectedDistrictFeature?.properties?.name || `District ${districtId}`;
+
+    updateSelectedDistrictHighlight();
+    updateStatusForSelection();
+
+    const effectiveResView =
+      selectedDistrictResView != null
+        ? selectedDistrictResView
+        : pickResByArea(getFeatureAreaKm2(selectedDistrictFeature));
+    const cacheKey = `${districtId}@${effectiveResView}`;
+    const cached = districtCellsCache.get(cacheKey);
+    if (cached) {
+      updateDistrictHexLayer(cached.featureCollection);
+      if (cached.meta?.district?.progress) {
+        const progress = cached.meta.district.progress;
+        const percentCells = progress.percent_cells ?? progress.percent;
+        selectedDistrictFeature.properties.percent_cells =
+          percentCells ?? selectedDistrictFeature.properties.percent_cells;
+        selectedDistrictFeature.properties.percent_weight =
+          progress.percent_weight ??
+          selectedDistrictFeature.properties.percent_weight;
+        updateStatusForSelection();
+      }
+      return;
+    }
+
+    const areaKm2 = getFeatureAreaKm2(selectedDistrictFeature);
+    const desiredRes = pickResByArea(areaKm2);
+    selectedDistrictResView = desiredRes;
+    const targetCacheKey = `${districtId}@${desiredRes}`;
+    const cachedForRes = districtCellsCache.get(targetCacheKey);
+    if (cachedForRes) {
+      updateDistrictHexLayer(cachedForRes.featureCollection);
+      if (cachedForRes.meta?.district?.progress) {
+        const progress = cachedForRes.meta.district.progress;
+        const percentCells = progress.percent_cells ?? progress.percent;
+        selectedDistrictFeature.properties.percent_cells =
+          percentCells ?? selectedDistrictFeature.properties.percent_cells;
+        selectedDistrictFeature.properties.percent_weight =
+          progress.percent_weight ??
+          selectedDistrictFeature.properties.percent_weight;
+        updateStatusForSelection();
+      }
+      return;
+    }
+
+    fetchDistrictCells(districtId, desiredRes);
+  }
+
+  function clearDistrictSelection() {
+    if (selectedDistrictAbortController) {
+      selectedDistrictAbortController.abort();
+      selectedDistrictAbortController = null;
+    }
+    const wasSelected = selectedDistrictId != null;
+    const previousId = selectedDistrictId;
+    selectedDistrictId = null;
+    selectedDistrictName = "";
+    selectedDistrictFeature = null;
+    selectedDistrictResView = null;
+    updateSelectedDistrictHighlight();
+    updateDistrictHexLayer(emptyFeatureCollection);
+    updateStatusForSelection();
+    if (wasSelected && previousId != null) {
+      const deleteKeys = [];
+      districtCellsCache.forEach((_, key) => {
+        if (typeof key === "string" && key.startsWith(`${previousId}@`)) {
+          deleteKeys.push(key);
+        }
+      });
+      deleteKeys.forEach((key) => districtCellsCache.delete(key));
+    }
+  }
+
+  function fetchDistrictCells(districtId, resView = null) {
+    if (selectedDistrictAbortController) {
+      selectedDistrictAbortController.abort();
+    }
+    setStatus(`Loading ${selectedDistrictName}…`, { temporary: true });
+    const controller = new AbortController();
+    selectedDistrictAbortController = controller;
+
+    fetchDistrictCellsRaw(districtId, resView, { signal: controller.signal })
+      .then(({ payload, resValue, featureCollection }) => {
+        if (controller.signal.aborted) return;
+        if (selectedDistrictId === districtId) {
+          selectedDistrictResView = resValue;
+          if (payload?.district?.progress) {
+            selectedDistrictFeature.properties.percent_cells =
+              payload.district.progress.percent_cells ??
+              payload.district.progress.percent ??
+              selectedDistrictFeature.properties.percent_cells;
+            selectedDistrictFeature.properties.percent_weight =
+              payload.district.progress.percent_weight ??
+              selectedDistrictFeature.properties.percent_weight;
+            
+            const existingFeature = districtFeatureMap.get(districtId);
+            if (existingFeature) {
+                existingFeature.properties.percent_cells = selectedDistrictFeature.properties.percent_cells;
+                existingFeature.properties.percent_weight = selectedDistrictFeature.properties.percent_weight;
+                existingFeature.properties.overlay_suffix = formatProgressSuffix(existingFeature);
+            }
+          }
+          updateDistrictHexLayer(featureCollection);
+          updateStatusForSelection();
+        }
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        console.warn("[district] Failed to fetch district cells", error);
+        if (selectedDistrictId === districtId) {
+          setStatus("Failed to load district cells", {
+            temporary: true,
+            state: "error",
+          });
+        }
+      })
+      .finally(() => {
+        if (selectedDistrictAbortController === controller) {
+          selectedDistrictAbortController = null;
+        }
+      });
+  }
+
+  function buildHexFeatureCollection(cells, districtId) {
+    const features = [];
+    if (Array.isArray(cells)) {
+      cells.forEach((cell) => {
+        if (!cell || !cell.h3) return;
+        try {
+          const boundary = h3.cellToBoundary(cell.h3, true);
+          if (!Array.isArray(boundary) || boundary.length === 0) return;
+          const coordinates = boundary.map(([lat, lng]) => [lng, lat]);
+          if (coordinates.length > 0) {
+            coordinates.push(coordinates[0]);
+          }
+          features.push({
+            type: "Feature",
+            geometry: {
+              type: "Polygon",
+              coordinates: [coordinates],
+            },
+            properties: {
+              h3: cell.h3,
+              coverage: typeof cell.coverage === "number" ? cell.coverage : 0,
+              visited: !!cell.visited,
+              visited_children: cell.visited_children ?? null,
+              total_children: cell.total_children ?? null,
+              visited_fraction: cell.visited_fraction ?? null,
+              district_id: districtId,
+            },
+          });
+        } catch (err) {
+          console.warn("[h3] Failed to build hex geometry", cell?.h3, err);
+        }
+      });
+    }
+    return toFeatureCollection(features);
+  }
+
+  function updateDistrictHexLayer(featureCollection) {
+    const source = map.getSource(ADMIN_SOURCES.districtHex);
+    if (!source) return;
+    source.setData(featureCollection || emptyFeatureCollection);
+  }
+
+  async function fetchDistrictCellsRaw(
+    districtId,
+    resView = null,
+    options = {},
+  ) {
+    const { signal } = options;
+    const resParam = typeof resView === "number" ? `?res_view=${resView}` : "";
+    const response = await fetch(
+      `/api/v1/district/${districtId}/cells${resParam}`,
+      {
+        signal,
+        headers: getAuthHeaders({ Accept: "application/json" }),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to fetch district cells: ${response.status}`);
+    }
+    const payload = await response.json();
+    const effectiveRes =
+      typeof payload?.resolution === "number"
+        ? payload.resolution
+        : BASE_DISTRICT_RESOLUTION;
+    const resValue = Math.min(effectiveRes, BASE_DISTRICT_RESOLUTION);
+    const cacheKey = `${districtId}@${resValue}`;
+    const featureCollection = buildHexFeatureCollection(
+      payload.cells || [],
+      districtId,
+    );
+    districtCellsCache.set(cacheKey, { featureCollection, meta: payload });
+    return { payload, resValue, cacheKey, featureCollection };
+  }
+
+  function setStatus(message, opts = {}) {
+    statusOverrideMessage = opts.temporary ? message : null;
+    if (!statusEl) return;
+    statusEl.textContent = message || DEFAULT_STATUS_TEXT;
+    statusEl.dataset.state = opts.state || "";
+  }
+
+  setStatus(DEFAULT_STATUS_TEXT);
+
+  if (noAuthMode || debugAuthMode) {
+    toggleFogBtn.style.display = "inline-block";
+  }
+
+  const cloudTexture = FogModule.createCloudTexture(512, 512);
+  const cloudPattern = fogCtx.createPattern(cloudTexture, "repeat");
+
+  function drawFogLoop() {
+    animationTime++;
+    FogModule.drawFog(
+      fogCtx,
+      map,
+      fogEnabled,
+      spatialIndex, // Pass spatial index instead of all hexagons
+      animationTime,
+      FOG_CONFIG,
+      DPR,
+      cloudPattern,
+      GRID_SIZE // Pass grid size to the module
+    );
+  }
+
+  async function addVisitAt(lat, lng) {
+    const response = await fetch("/api/v1/visit", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ lat, lon: lng }),
+    });
+    if (!response.ok) {
+      throw new Error(`Server error: ${response.statusText}`);
+    }
+    const result = await response.json();
+    if (result.added > 0) {
+      const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
+      const hexId = h3.latLngToCell(lat, lng, h3Resolution);
+      if (!allKnownHexagons.has(hexId)) {
+        allKnownHexagons.add(hexId);
+        addToSpatialIndex(hexId);
+      }
+      const total =
+        result.stats && typeof result.stats.total_circles === "number"
+          ? result.stats.total_circles
+          : allKnownHexagons.size;
+      countEl.textContent = Number(total).toLocaleString();
+      map.triggerRepaint();
+    }
+    return result;
+  }
+
+  async function deleteHexAtPoint(point) {
+    const lngLat = map.unproject(point);
+    const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
+    const targetHexId = h3.latLngToCell(lngLat.lat, lngLat.lng, h3Resolution);
+
+    if (!allKnownHexagons.has(targetHexId)) {
+      console.log(
+        "Clicked on a cell that is not a known hexagon:",
+        targetHexId,
+      );
+      return;
+    }
+
+    const response = await fetch("/api/v1/circle", {
+      method: "DELETE",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ geokey: targetHexId }),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(
+        `Delete failed with status ${response.status}: ${errText}`,
+      );
+    }
+    const res = await response.json();
+    if (res.deleted > 0) {
+      allKnownHexagons.delete(targetHexId);
+      removeFromSpatialIndex(targetHexId);
+      countEl.textContent = allKnownHexagons.size.toLocaleString();
+      map.triggerRepaint();
+      console.log("Deleted hexagon:", targetHexId);
+    } else {
+      console.warn("Delete command sent, but server reported 0 deleted.", {
+        geokey: targetHexId,
+      });
+    }
+  }
+
+  // --- Rest of the code ---
+  const loader = document.getElementById("loader");
+  async function updateHexagonsFromServer() {
+    if (isFetching) return;
+    isFetching = true;
+    const loaderTimeout = setTimeout(() => {
+      if (loader) loader.style.display = "flex";
+    }, 500);
+    try {
+      const bounds = map.getBounds();
+      const bbox = [
+        bounds.getWest(),
+        bounds.getSouth(),
+        bounds.getEast(),
+        bounds.getNorth(),
+      ].join(",");
+      const response = await fetch(`/api/v1/circles?bbox=${bbox}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!response.ok)
+        throw new Error(`Network error: ${response.statusText}`);
+      const data = await response.json();
+      let newHexagons = 0;
+      data.hexagons.forEach((hexId) => {
+        if (!allKnownHexagons.has(hexId)) {
+          allKnownHexagons.add(hexId);
+          addToSpatialIndex(hexId);
+          newHexagons++;
+        }
+      });
+      if (newHexagons > 0) {
+        countEl.textContent = allKnownHexagons.size.toLocaleString();
+      }
+      map.triggerRepaint();
+    } catch (error) {
+      console.error("[fog] Failed to fetch hexagons:", error);
+    } finally {
+      isFetching = false;
+      clearTimeout(loaderTimeout);
+      if (loader) loader.style.display = "none";
+    }
+  }
+
+  async function revealEntireDistrict(districtId) {
+    const areaKm2 = getFeatureAreaKm2(selectedDistrictFeature);
+    const desiredRes = pickResByArea(areaKm2);
+    const cacheKey = `${districtId}@${desiredRes}`;
+    let cached = districtCellsCache.get(cacheKey);
+    if (!cached) {
+      await fetchDistrictCells(districtId, desiredRes);
+      cached = districtCellsCache.get(cacheKey);
+    }
+    const meta = cached?.meta;
+    if (!meta || !Array.isArray(meta.cells) || meta.cells.length === 0) {
+      throw new Error("No cells cached for district");
+    }
+
+    let revealCells = meta.cells;
+    if (desiredRes < BASE_DISTRICT_RESOLUTION) {
+      const detailed = await fetchDistrictCellsRaw(
+        districtId,
+        BASE_DISTRICT_RESOLUTION,
+      );
+      revealCells =
+        detailed.meta?.cells || detailed.payload?.cells || revealCells;
+    }
+
+    await revealDistrictViaVisits(revealCells);
+
+    await Promise.all([
+      updateHexagonsFromServer(),
+      fetchDistrictCells(districtId, desiredRes),
+    ]);
+    refreshAdminLayers();
+  }
+
+  async function revealDistrictViaVisits(cells) {
+    if (!Array.isArray(cells) || cells.length === 0) return;
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      if (!cell || !cell.h3) continue;
+      if (allKnownHexagons.has(cell.h3)) continue;
+      const [lat, lng] = h3.cellToLatLng(cell.h3);
+      try {
+        const response = await fetch("/api/v1/visit", {
+          method: "POST",
+          headers: getAuthHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ lat, lon: lng }),
+        });
+        if (response.ok) {
+          const result = await response.json();
+          if (result.added > 0) {
+            allKnownHexagons.add(cell.h3);
+            addToSpatialIndex(cell.h3);
+            const total =
+              result.stats && typeof result.stats.total_circles === "number"
+                ? result.stats.total_circles
+                : allKnownHexagons.size;
+            countEl.textContent = Number(total).toLocaleString();
+            map.triggerRepaint();
+          }
+        }
+      } catch (err) {
+        console.warn("[debug] reveal visit failed", { cell: cell.h3, err });
+      }
+    }
+  }
+
+  map.on("load", () => {
+    const mapContainer = document.getElementById("map-container");
+    const controls = mapContainer.querySelector(
+      ".maplibregl-control-container",
+    );
+    if (controls) {
+      mapContainer.appendChild(controls);
+    }
+    const resizeObserver = new ResizeObserver(() => {
+      const cssW = mapContainer.clientWidth;
+      const cssH = mapContainer.clientHeight;
+      fogCanvas.style.width = cssW + "px";
+      fogCanvas.style.height = cssH + "px";
+      fogCanvas.width = Math.max(1, Math.floor(cssW * DPR));
+      fogCanvas.height = Math.max(1, Math.floor(cssH * DPR));
+      fogCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    });
+    resizeObserver.observe(mapContainer);
+    updateHexagonsFromServer();
+    refreshAdminLayers();
+    try {
+      geolocate.trigger();
+    } catch (e) {
+      console.error(e);
+    }
+
+    map.on("render", drawFogLoop);
+  });
+
+  map.on("moveend", () => {
+    updateHexagonsFromServer();
+    scheduleAdminRefresh();
+  });
+  map.on("move", () => scheduleAdminRefresh(true));
+  map.on("zoomend", () => scheduleAdminRefresh());
+  map.on("movestart", () => {
+    ignoreNextClick = true;
+  });
+  map.on("moveend", () => {
+    setTimeout(() => {
+      ignoreNextClick = false;
+    }, 120);
+  });
+
+  let lastKnownPosition = null;
+  const TARGET_GEO_ZOOM = 17;
+  openBtn.disabled = true;
+  openBtn.textContent = "Locating...";
+
+  geolocate.on("geolocate", (pos) => {
+    lastKnownPosition = pos.coords;
+    const zoom = Math.max(map.getZoom(), TARGET_GEO_ZOOM);
+    map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom });
+    openBtn.disabled = false;
+    openBtn.textContent = "Explore 50m Around";
+  });
+
+  geolocate.on("error", () => {
+    if (noAuthMode) {
+      openBtn.textContent = "Click map to add points";
+      openBtn.disabled = false;
+    } else {
+      openBtn.textContent = "Geolocation failed";
+    }
+  });
+
+  openBtn.addEventListener("click", async () => {
+    if (!lastKnownPosition) {
+      if (noAuthMode) {
+        alert("Click on the map to add points.");
+      } else {
+        alert("Location not determined.");
+      }
+      return;
+    }
+    openBtn.disabled = true;
+    try {
+      const response = await fetch("/api/v1/visit", {
+        method: "POST",
+        headers: getAuthHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          lat: lastKnownPosition.latitude,
+          lon: lastKnownPosition.longitude,
+        }),
+      });
+      if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+      const result = await response.json();
+      if (result.added > 0) {
+        const h3Resolution =
+          window.currentH3Resolution || defaultVisitResolution;
+        const hexId = h3.latLngToCell(
+          lastKnownPosition.latitude,
+          lastKnownPosition.longitude,
+          h3Resolution,
+        );
+        if(!allKnownHexagons.has(hexId)) {
+            allKnownHexagons.add(hexId);
+            addToSpatialIndex(hexId);
+        }
+        countEl.textContent =
+          result.stats && typeof result.stats.total_circles === "number"
+            ? result.stats.total_circles.toLocaleString()
+            : allKnownHexagons.size.toLocaleString();
+        map.triggerRepaint();
+      }
+    } catch (error) {
+      console.error("[visit] Failed to visit area:", error);
+    } finally {
+      openBtn.disabled = !lastKnownPosition;
+    }
+  });
+
+  toggleFogBtn.addEventListener("click", () => {
+    fogEnabled = !fogEnabled;
+    toggleFogBtn.textContent = fogEnabled ? "Hide Fog" : "Show Fog";
+    map.triggerRepaint();
+  });
+
+  // Debug UI
+  const deleteModeBtn = document.getElementById("deleteModeBtn");
+  const clearDbBtn = document.getElementById("clearDbBtn");
+  const debugPanel = document.getElementById("debugPanel");
+  const revealDistrictBtn = document.getElementById("revealDistrictBtn");
+  let deleteMode = false;
+  let selectionEnabled = true;
+
+  function setDeleteMode(on) {
+    deleteMode = !!on;
+    if (deleteModeBtn) {
+      deleteModeBtn.textContent = deleteMode ? "Delete: On" : "Delete: Off";
+      deleteModeBtn.style.background = deleteMode ? "#b91c1c" : "#ef4444";
+    }
+  }
+
+  function setSelectionEnabled(on) {
+    selectionEnabled = !!on;
+    const selectionToggleBtn = document.getElementById("selectionToggleBtn");
+    if (selectionToggleBtn) {
+      selectionToggleBtn.textContent = selectionEnabled
+        ? "Select: On"
+        : "Select: Off";
+      selectionToggleBtn.style.background = selectionEnabled
+        ? "#0ea5e9"
+        : "#475569";
+    }
+  }
+
+  if (noAuthMode || debugAuthMode) {
+    if (debugPanel) debugPanel.style.display = "flex";
+  }
+
+  if (deleteModeBtn) {
+    deleteModeBtn.addEventListener("click", () => setDeleteMode(!deleteMode));
+  }
+
+  const selectionToggleBtn = document.getElementById("selectionToggleBtn");
+  setSelectionEnabled(true);
+  if (selectionToggleBtn) {
+    selectionToggleBtn.addEventListener("click", () => {
+      setSelectionEnabled(!selectionEnabled);
+    });
+  }
+
+  if (leaderboardBtn) {
+    leaderboardBtn.addEventListener("click", () => {
+      leaderboardLevelSelect.value = leaderboardState.level;
+      leaderboardPeriodSelect.value = leaderboardState.period;
+      showLeaderboard();
+    });
+  }
+
+  if (leaderboardCloseBtn) {
+    leaderboardCloseBtn.addEventListener("click", hideLeaderboard);
+  }
+
+  if (leaderboardOverlay) {
+    leaderboardOverlay.addEventListener("click", (event) => {
+      if (event.target === leaderboardOverlay) hideLeaderboard();
+    });
+  }
+
+  if (leaderboardLevelSelect) {
+    leaderboardLevelSelect.addEventListener(
+      "change",
+      handleLeaderboardLevelChange,
+    );
+  }
+
+  if (leaderboardPeriodSelect) {
+    leaderboardPeriodSelect.addEventListener(
+      "change",
+      handleLeaderboardPeriodChange,
+    );
+  }
+
+  document.addEventListener("keydown", handleLeaderboardKey);
+
+  if (revealDistrictBtn) {
+    revealDistrictBtn.addEventListener("click", async () => {
+      if (!selectedDistrictId) {
+        alert("Select a district first.");
+        return;
+      }
+      revealDistrictBtn.disabled = true;
+      revealDistrictBtn.textContent = "Revealing…";
+      try {
+        await revealEntireDistrict(selectedDistrictId);
+      } catch (err) {
+        console.warn("[debug] reveal district failed", err);
+        alert("Failed to reveal district");
+      } finally {
+        revealDistrictBtn.disabled = false;
+        revealDistrictBtn.textContent = "Reveal District";
+      }
+    });
+  }
+
+  if (clearDbBtn) {
+    clearDbBtn.addEventListener("click", async () => {
+      if (!confirm("Clear the entire database? This action is irreversible."))
+        return;
+      try {
+        const res = await fetch("/api/v1/dev/clear-db", { method: "POST" });
+        if (!res.ok) throw new Error("clear-db failed");
+        const data = await res.json().catch(() => ({}));
+        allKnownHexagons.clear();
+        spatialIndex.clear(); // Clear the index too
+        countEl.textContent = "0";
+        map.triggerRepaint();
+        alert(
+          `DB cleared. circles=${data.cleared_circles ?? "?"}, users=${data.cleared_users ?? "?"}`,
+        );
+      } catch (e) {
+        alert("Error clearing database");
+        console.warn("[dev] clear-db error", e);
+      }
+    });
+  }
+
+  map.on("click", (e) => {
+    if (ignoreNextClick) return;
+
+    const districtFeatures = map.queryRenderedFeatures(e.point, {
+      layers: [ADMIN_LAYERS.districtHitArea],
+    });
+    if (districtFeatures && districtFeatures.length > 0) {
+      if (selectionEnabled) {
+        handleDistrictSelection(districtFeatures[0]);
+        return;
+      }
+    }
+
+    if ((noAuthMode || debugAuthMode) && !deleteMode) {
+      const lngLat = map.unproject(e.point);
+      addVisitAt(lngLat.lat, lngLat.lng)
+        .then(() => {
+          scheduleAdminRefresh();
+        })
+        .catch((error) => {
+          console.error("[visit] Failed to visit area:", error);
+        });
+      return;
+    }
+
+    if (deleteMode) {
+      deleteHexAtPoint(e.point);
+    }
+  });
+})();
+debug-auth.html:
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Telegram Mini App Auth Demo</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+      body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+      .card { max-width: 720px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; }
+      .muted { color: #6b7280; }
+      .error { color: #b91c1c; font-weight: 600; }
+      .success { color: #065f46; font-weight: 600; }
+      pre { white-space: pre-wrap; word-break: break-word; background: #f8fafc; padding: 12px; border-radius: 8px; }
+      button { padding: 10px 16px; border-radius: 8px; border: 1px solid #d1d5db; background: #111827; color: white; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Тестовая мини-аппка: проверка аутентификации</h2>
+      <p class="muted">Страница должна открываться только из вебвью Telegram Mini App. Если вы видите ошибку — откройте через кнопку в боте.</p>
+      <div id="status" class="muted">Инициализация…</div>
+      <div id="content" style="display:none">
+        <p class="success">Аутентификация прошла успешно.</p>
+        <pre id="user"></pre>
+      </div>
+      <div id="error" style="display:none" class="error"></div>
+      <div style="margin-top:16px">
+        <button id="retry" style="display:none">Повторить попытку</button>
+      </div>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const errorEl = document.getElementById('error');
+      const contentEl = document.getElementById('content');
+      const userEl = document.getElementById('user');
+      const retryBtn = document.getElementById('retry');
+
+      function showError(msg) {
+        statusEl.style.display = 'none';
+        contentEl.style.display = 'none';
+        errorEl.style.display = 'block';
+        retryBtn.style.display = 'inline-block';
+        errorEl.textContent = msg;
+      }
+
+      async function authenticate() {
+        try {
+          if (!window.Telegram || !window.Telegram.WebApp) {
+            showError('Среда Telegram WebApp не обнаружена. Откройте через бота.');
+            return;
+          }
+
+          const initData = window.Telegram.WebApp.initData || '';
+          if (!initData) {
+            showError('Отсутствует initData. Откройте через кнопку WebApp в Telegram.');
+            return;
+          }
+
+          window.Telegram.WebApp.ready();
+
+          statusEl.textContent = 'Проверяем подпись…';
+          const res = await fetch('/api/auth', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-H3-Resolution': `${window.currentH3Resolution || ''}`,
+            },
+            body: JSON.stringify({ initData }),
+          });
+
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            showError('Доступ запрещён: ' + (data.error || res.status));
+            return;
+          }
+
+          statusEl.textContent = 'Пинг…';
+          const pingRes = await fetch('/api/ping');
+          if (!pingRes.ok) {
+            showError('Ping failed: ' + pingRes.status);
+            return;
+          }
+
+          statusEl.textContent = 'Загружаем профиль…';
+          const meRes = await fetch('/api/me', { credentials: 'include' });
+          const me = await meRes.json();
+          contentEl.style.display = 'block';
+          statusEl.style.display = 'none';
+          userEl.textContent = JSON.stringify(me.user, null, 2);
+        } catch (e) {
+          showError('Ошибка: ' + (e && e.message ? e.message : e));
+        }
+      }
+
+      retryBtn.addEventListener('click', authenticate);
+      authenticate();
+    </script>
+  </body>
+  </html>
+
+
+
+fog.js:
+function createCloudTexture(width, height) {
+  const useOffscreen = typeof OffscreenCanvas === 'function';
+  const canvas = useOffscreen ? new OffscreenCanvas(width, height) : document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(width, height);
+  const data = imageData.data;
+
+    // Noise generator
+    let seed = Math.random(); function random() { const x = Math.sin(seed++) * 10000; return x - Math.floor(x); }
+    const p = new Uint8Array(512);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+    for (let i = 0; i < 256; i++) p[i + 256] = p[i];
+    function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+    function lerp(t, a, b) { return a + t * (b - a); }
+    function grad(hash, x, y) { const h = hash & 7; const u = h < 4 ? x : y; const v = h < 4 ? y : x; return ((h & 1) ? -u : u) + ((h & 2) ? -2 * v : 2 * v); }
+    function noise(x, y) {
+        const X = Math.floor(x) & 255, Y = Math.floor(y) & 255; x -= Math.floor(x); y -= Math.floor(y);
+        const u = fade(x), v = fade(y);
+        const A = p[X] + Y, B = p[X + 1] + Y;
+        return lerp(v, lerp(u, grad(p[A], x, y), grad(p[B], x - 1, y)), lerp(u, grad(p[A + 1], x, y - 1), grad(p[B + 1], x - 1, y - 1)));
+    }
+    function fBm(x, y, octaves) {
+        let total = 0, frequency = 1, amplitude = 1, maxValue = 0;
+        for (let i = 0; i < octaves; i++) {
+            total += noise(x * frequency, y * frequency) * amplitude;
+            maxValue += amplitude; amplitude *= 0.5; frequency *= 2.0;
+        }
+        return (total / maxValue + 1) / 2;
+    }
+    function smoothstep(edge0, edge1, x) {
+        const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+        return t * t * (3 - 2 * t);
+    }
+
+    const sample = (x, y, scale, oct) => {
+      const nx = x/width, ny = y/height;
+      return lerp(smoothstep(0,1,ny), lerp(smoothstep(0,1,nx), fBm(x*scale,y*scale,oct), fBm((x-width)*scale,y*scale,oct)), lerp(smoothstep(0,1,nx), fBm(x*scale,(y-height)*scale,oct), fBm((x-width)*scale,(y-height)*scale,oct)));
+    };
+
+    for (let j = 0; j < height; j++) {
+        for (let i = 0; i < width; i++) {
+
+             const base_scale = 0.008;
+             const detail_scale = 0.075;
+             const height_scale = 0.02;
+
+             const v_base = sample(i, j, base_scale, 6);
+             const v_detail = sample(i, j, detail_scale, 10);
+             const v_height = sample(i, j, height_scale, 8);
+
+             const idx = (j * width + i) * 4;
+
+             const base_alpha = 0.995;
+
+             let density = smoothstep(0.12, 0.88, v_base);
+             density = Math.pow(density, 0.75);
+             const height_factor = smoothstep(0.08, 0.92, v_height);
+             const final_density = Math.min(1.0, density + height_factor * 0.45);
+             const final_alpha = base_alpha + (1 - base_alpha) * final_density;
+
+             const shadow_color = [220, 225, 230];
+             const mid_color = [250, 251, 252];
+             const peak_color = [255, 255, 255];
+
+             const volume_factor = v_detail * 0.55 + height_factor * 0.45;
+             let color_intensity = smoothstep(0.05, 0.95, volume_factor);
+             color_intensity = Math.min(1, Math.max(0, 0.5 + (color_intensity - 0.5) * 1.35));
+
+             const atmosphere_factor = smoothstep(0.4, 0.8, height_factor);
+             const atmosphere_darkening = 1 - atmosphere_factor * 0.03;
+
+             let r, g, b;
+             if (color_intensity < 0.5) {
+                 const t = color_intensity * 2;
+                 r = lerp(t, shadow_color[0], mid_color[0]);
+                 g = lerp(t, shadow_color[1], mid_color[1]);
+                 b = lerp(t, shadow_color[2], mid_color[2]);
+             } else {
+                 const t = (color_intensity - 0.5) * 2;
+                 r = lerp(t, mid_color[0], peak_color[0]);
+                 g = lerp(t, mid_color[1], peak_color[1]);
+                 b = lerp(t, mid_color[2], peak_color[2]);
+             }
+
+             const lightFactor = smoothstep(0.3, 0.8, v_height * 0.6 + v_detail * 0.4);
+             const highlight = lightFactor * 0.18;
+             const shadow = (1 - lightFactor) * 0.18;
+             r = r * (1 - shadow) + 255 * highlight;
+             g = g * (1 - shadow) + 255 * highlight;
+             b = b * (1 - shadow) + 255 * highlight;
+
+             r *= atmosphere_darkening;
+             g *= atmosphere_darkening;
+             b *= atmosphere_darkening;
+
+            const whitenessBoost = 0.7;
+            r = r + (255 - r) * whitenessBoost;
+            g = g + (255 - g) * whitenessBoost;
+            b = b + (255 - b) * whitenessBoost;
+
+            data[idx] = r; data[idx+1] = g; data[idx+2] = b;
+            data[idx+3] = Math.floor(final_alpha * 255);
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+// Caches to reduce repeated H3 geometry computations
+const __boundaryCache = new Map();
+const __centerCache = new Map();
+let __lastRenderMs = 0;
+
+// --- UPDATED drawFog function ---
+function drawFog(fogCtx, map, fogEnabled, spatialIndex, animationTime, FOG_CONFIG, DPR, cloudPattern, GRID_SIZE) {
+  const width = fogCtx.canvas.clientWidth || fogCtx.canvas.width / DPR;
+  const height = fogCtx.canvas.clientHeight || fogCtx.canvas.height / DPR;
+
+  const now = performance.now();
+  const isMoving = map.isMoving() || map.isZooming() || map.isRotating();
+  if (!isMoving && now - __lastRenderMs < 33) return;
+  __lastRenderMs = now;
+
+  fogCtx.clearRect(0, 0, width, height);
+  if (!fogEnabled) return;
+
+  fogCtx.globalCompositeOperation = 'source-over';
+  const zoom = map.getZoom();
+  const scale = Math.pow(2, zoom - 12);
+  const mapOffset = map.project([0, 0]);
+
+  const patternMatrix = new DOMMatrix();
+  patternMatrix.a = scale; patternMatrix.d = scale;
+  patternMatrix.e = mapOffset.x; patternMatrix.f = mapOffset.y;
+  cloudPattern.setTransform(patternMatrix);
+
+  fogCtx.save();
+  fogCtx.globalAlpha = 1;
+  fogCtx.fillStyle = cloudPattern;
+  fogCtx.fillRect(0, 0, width, height);
+  fogCtx.fillStyle = 'rgba(250, 252, 255, 0.85)';
+  fogCtx.fillRect(0, 0, width, height);
+  fogCtx.fillStyle = 'rgba(210, 220, 234, 0.35)';
+  fogCtx.fillRect(0, 0, width, height);
+  fogCtx.restore();
+
+  if (spatialIndex.size === 0) return;
+
+  // --- NEW: Get visible hexagons from the spatial index ---
+  const bounds = map.getBounds();
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+
+  const visibleHexSet = new Set();
+  const minGridX = Math.floor(sw.lng / GRID_SIZE);
+  const maxGridX = Math.floor(ne.lng / GRID_SIZE);
+  const minGridY = Math.floor(sw.lat / GRID_SIZE);
+  const maxGridY = Math.floor(ne.lat / GRID_SIZE);
+
+  for (let x = minGridX; x <= maxGridX; x++) {
+      for (let y = minGridY; y <= maxGridY; y++) {
+          const key = `${x}_${y}`;
+          if (spatialIndex.has(key)) {
+              spatialIndex.get(key).forEach(hexId => {
+                  visibleHexSet.add(hexId);
+              });
+          }
+      }
+  }
+  const visibleHexagons = Array.from(visibleHexSet);
+  // --- END NEW ---
+
+  if (visibleHexagons.length === 0) return;
+
+  // --- UPDATED: Adjusted performance thresholds ---
+  const heavyLoad = visibleHexagons.length > 120;
+  const extremeLoad = visibleHexagons.length > 250;
+  const pulseEnabled = !heavyLoad && visibleHexagons.length <= 100;
+  const blurScale = heavyLoad ? (extremeLoad ? 0 : 0.55) : 1;
+  const shadowBlurPx = blurScale > 0 ? Math.max(8, FOG_CONFIG.shadowBlur * blurScale) : 0;
+  const revealBlurPx = blurScale > 0 ? Math.max(6, FOG_CONFIG.revealBlur * blurScale) : 0;
+
+  const frameGeometries = new Map();
+
+  if (heavyLoad) {
+    // EVEN MORE SIMPLIFIED rendering: batch-draw soft circles
+    fogCtx.globalCompositeOperation = 'destination-out';
+    
+    // Step 1: Collect all circle geometries needed for this frame
+    for (const hexId of visibleHexagons) {
+      try {
+        let boundary = __boundaryCache.get(hexId);
+        if (!boundary) { boundary = h3.cellToBoundary(hexId); __boundaryCache.set(hexId, boundary); }
+        let center = __centerCache.get(hexId);
+        if (!center) { center = h3.cellToLatLng(hexId); __centerCache.set(hexId, center); }
+
+        const centerPixels = map.project([center[1], center[0]]);
+        const sample = boundary[0] || center;
+        const samplePixels = map.project([sample[1], sample[0]]);
+        const radius = Math.max(4, Math.hypot(samplePixels.x - centerPixels.x, samplePixels.y - centerPixels.y) * 1.65);
+
+        frameGeometries.set(hexId, { center, centerPixels, radius });
+      } catch (e) { /* ignore errors for this hex */ }
+    }
+
+    // Step 2: Batch-draw all shadows in a single operation
+    fogCtx.filter = shadowBlurPx > 0 ? `blur(${shadowBlurPx}px)` : 'none';
+    fogCtx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    const shadowPath = new Path2D();
+    for (const geom of frameGeometries.values()) {
+        shadowPath.moveTo(geom.centerPixels.x + geom.radius, geom.centerPixels.y);
+        shadowPath.arc(geom.centerPixels.x, geom.centerPixels.y, geom.radius, 0, Math.PI * 2);
+    }
+    fogCtx.fill(shadowPath);
+
+
+    // Step 3: Batch-draw all reveals in a single operation
+    fogCtx.filter = revealBlurPx > 0 ? `blur(${revealBlurPx}px)` : 'none';
+    fogCtx.fillStyle = 'white';
+    const revealPath = new Path2D();
+    for (const geom of frameGeometries.values()) {
+        const revealRadius = geom.radius * 0.92;
+        revealPath.moveTo(geom.centerPixels.x + revealRadius, geom.centerPixels.y);
+        revealPath.arc(geom.centerPixels.x, geom.centerPixels.y, revealRadius, 0, Math.PI * 2);
+    }
+    fogCtx.fill(revealPath);
+
+  } else {
+    // Detailed rendering with cached paths
+    fogCtx.globalCompositeOperation = 'destination-out';
+    fogCtx.filter = `blur(${shadowBlurPx}px)`;
+
+    const shadowPath = new Path2D();
+    for (let i = 0; i < visibleHexagons.length; i++) {
+      const hexId = visibleHexagons[i];
+      try {
+        let boundary = __boundaryCache.get(hexId);
+        if (!boundary) { boundary = h3.cellToBoundary(hexId); __boundaryCache.set(hexId, boundary); }
+        let center = __centerCache.get(hexId);
+        if (!center) { center = h3.cellToLatLng(hexId); __centerCache.set(hexId, center); }
+
+        const path = new Path2D();
+        const first = boundary[0];
+        const firstProjected = map.project([first[1], first[0]]);
+        path.moveTo(firstProjected.x, firstProjected.y);
+        for (let j = 1; j < boundary.length; j++) {
+          const ll = boundary[j];
+          const projected = map.project([ll[1], ll[0]]);
+          path.lineTo(projected.x, projected.y);
+        }
+        path.closePath();
+        shadowPath.addPath(path);
+
+        const centerPixels = map.project([center[1], center[0]]);
+        frameGeometries.set(hexId, { path, center, centerPixels });
+      } catch (e) {}
+    }
+    fogCtx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    fogCtx.fill(shadowPath);
+
+    fogCtx.filter = `blur(${revealBlurPx}px)`;
+    if (pulseEnabled) {
+      for (let i = 0; i < visibleHexagons.length; i++) {
+        const hexId = visibleHexagons[i];
+        const geom = frameGeometries.get(hexId);
+        if (!geom) continue;
+        try {
+          const pulse = 1 + Math.sin(animationTime * FOG_CONFIG.animationSpeed + geom.center[0] + geom.center[1]) * FOG_CONFIG.pulseAmplitude;
+
+          fogCtx.save();
+          const cp = geom.centerPixels;
+          fogCtx.translate(cp.x, cp.y);
+          fogCtx.scale(pulse, pulse);
+          fogCtx.translate(-cp.x, -cp.y);
+
+          fogCtx.fillStyle = 'white';
+          fogCtx.fill(geom.path);
+          fogCtx.restore();
+        } catch (e) {}
+      }
+    } else {
+      const revealPath = new Path2D();
+      for (let i = 0; i < visibleHexagons.length; i++) {
+        const hexId = visibleHexagons[i];
+        const geom = frameGeometries.get(hexId);
+        if (!geom) continue;
+        revealPath.addPath(geom.path);
+      }
+      fogCtx.fillStyle = 'white';
+      fogCtx.fill(revealPath);
+    }
+  }
+
+  fogCtx.filter = 'none';
+  fogCtx.globalCompositeOperation = 'source-over';
+}
+
+window.FogModule = { createCloudTexture, drawFog };
+index.html:
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>City Fog Map</title>
+    <link
+      href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link href="/webapp/style.css" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="toolbar">
+        <h1>City Fog Map</h1>
+        <button id="openBtn" class="btn">Explore 50m Around</button>
+        <button id="leaderboardBtn" class="btn btn-secondary">
+          Leaderboard
+        </button>
+        <button id="toggleFogBtn" class="btn" style="display: none">
+          Hide Fog
+        </button>
+        <span id="status"></span>
+        <span class="count-label">Explored: <span id="count">0</span></span>
+        <div id="debugPanel" style="display: none">
+          <button id="deleteModeBtn" class="btn">Delete: Off</button>
+          <button id="selectionToggleBtn" class="btn">Select: On</button>
+          <button id="revealDistrictBtn" class="btn">Reveal District</button>
+          <button id="clearDbBtn" class="btn" title="Clear all data (dev)">
+            Clear DB
+          </button>
+        </div>
+      </div>
+
+      <div id="map-container">
+        <div id="map"></div>
+        <canvas id="fog-canvas"></canvas>
+        <!-- REMOVED: <div id="label-overlay"></div> -->
+        <div id="loader"><div class="spinner"></div></div>
+      </div>
+
+      <div id="leaderboard-overlay" class="leaderboard-overlay">
+        <div
+          class="leaderboard-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="leaderboardTitle"
+        >
+          <div class="leaderboard-header">
+            <h2 id="leaderboardTitle">Leaderboard</h2>
+            <button
+              id="leaderboardCloseBtn"
+              class="btn btn-ghost"
+              aria-label="Close leaderboard"
+            >
+              ✕
+            </button>
+          </div>
+          <div class="leaderboard-controls">
+            <label class="control">
+              <span>Level</span>
+              <select id="leaderboardLevel">
+                <option value="district">District</option>
+                <option value="okrug">Okrug</option>
+              </select>
+            </label>
+            <label class="control">
+              <span>Period</span>
+              <select id="leaderboardPeriod">
+                <option value="week">Week</option>
+                <option value="season">Season</option>
+              </select>
+            </label>
+          </div>
+          <div id="leaderboardStatus" class="leaderboard-status"></div>
+          <div class="leaderboard-table-wrapper">
+            <table class="leaderboard-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Player</th>
+                  <th>Cells</th>
+                  <th>Weight</th>
+                  <th>% Cells</th>
+                  <th>% Weight</th>
+                </tr>
+              </thead>
+              <tbody id="leaderboardBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+    <script src="/webapp/fog.js"></script>
+    <script src="/webapp/app.js"></script>
+  </body>
+</html>
+style.css:
+@import url("https://fonts.googleapis.com/css2?family=Russo+One&display=swap");
+
+:root {
+  --bg-color: #1a1a1a;
+  --toolbar-bg: rgba(26, 26, 26, 0.6); /* Semi-transparent */
+  --primary-color: #0ea5e9; /* Sky Blue */
+  --primary-hover: #38bdf8; /* Lighter Sky Blue */
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --border-color: #334155;
+  --danger-color: #f43f5e;
+  --danger-hover: #fb7185;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background-color: var(--bg-color);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill-rule='evenodd'%3E%3Cg fill='%23222222' fill-opacity='0.4'%3E%3Cpath opacity='.5' d='M96 95h4v1h-4v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5V0h1v5h9V0h1v5zm-1 0V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0V5h6z'/%3E%3Cpath d='M6 5V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5V0h1v5h9V0h1v5zm-1 0V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h9V0h1v5h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5h-1v-5h-9v5H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0v-1h5v-9H0V5h6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  font-family: "Inter", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: var(--text-primary);
+}
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+#toolbar {
+  padding: 10px 14px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background-color: var(--toolbar-bg);
+  border-bottom: 1px solid var(--border-color);
+  z-index: 50;
+  flex-shrink: 0;
+  backdrop-filter: blur(8px);
+}
+
+#toolbar h1 {
+  font-family: "Russo One", sans-serif;
+  font-size: 20px;
+  margin: 0;
+  color: var(--text-primary);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  margin-right: auto;
+}
+
+#map-container {
+  position: relative;
+  flex: 1;
+}
+
+#map {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 20;
+}
+
+#fog-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 25;
+  pointer-events: none;
+  mix-blend-mode: normal;
+}
+
+.maplibregl-control-container {
+  z-index: 30;
+}
+
+.btn {
+  background-color: var(--primary-color);
+  color: white;
+  text-shadow: none;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.2),
+    inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.btn:hover:not(:disabled) {
+  background-color: var(--primary-hover);
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.25),
+    inset 0 1px 1px rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow:
+    0 1px 4px rgba(0, 0, 0, 0.2),
+    inset 0 2px 2px rgba(0, 0, 0, 0.1);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--text-secondary);
+  box-shadow: none;
+}
+
+#status {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.count-label {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+#count {
+  font-weight: 700;
+  color: var(--primary-color);
+  margin-left: 4px;
+  font-size: 16px;
+}
+
+#loader {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(26, 26, 26, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.spinner {
+  border: 4px solid rgba(14, 165, 233, 0.2);
+  border-radius: 50%;
+  border-top: 4px solid var(--primary-color);
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+#debugPanel {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+#deleteModeBtn {
+  background-color: var(--danger-color);
+}
+#deleteModeBtn:hover:not(:disabled) {
+  background-color: var(--danger-hover);
+}
+
+/*
+  REMOVED: The .district-label class is no longer needed
+  as labels are now rendered by MapLibre's symbol layer.
+*/
+
+.btn-secondary {
+  background-color: transparent;
+  color: var(--primary-color);
+  border: 1px solid rgba(14, 165, 233, 0.6);
+}
+.btn-secondary:hover:not(:disabled) {
+  background-color: rgba(14, 165, 233, 0.12);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  padding: 6px 10px;
+  font-size: 16px;
+}
+.btn-ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  background-color: rgba(148, 163, 184, 0.12);
+}
+
+.leaderboard-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 16, 0.72);
+  backdrop-filter: blur(12px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.leaderboard-overlay.visible {
+  display: flex;
+}
+
+.leaderboard-panel {
+  width: min(680px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(17, 24, 39, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+  padding: 20px;
+  gap: 16px;
+}
+
+.leaderboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.leaderboard-header h2 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.leaderboard-controls {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.leaderboard-controls .control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.leaderboard-controls select {
+  background: rgba(30, 41, 59, 0.8);
+  color: var(--text-primary);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.leaderboard-status {
+  min-height: 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.leaderboard-table-wrapper {
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.leaderboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: rgba(15, 23, 42, 0.75);
+}
+
+.leaderboard-table thead {
+  background: rgba(14, 165, 233, 0.15);
+  color: var(--text-primary);
+}
+
+.leaderboard-table th,
+.leaderboard-table td {
+  padding: 10px 12px;
+  font-size: 13px;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.leaderboard-table tbody tr:hover {
+  background: rgba(14, 165, 233, 0.08);
+}
+
+.leaderboard-table .rank {
+  font-weight: 700;
+  color: var(--primary-color);
+}
+
+.leaderboard-table .username {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+@media (max-width: 600px) {
+  .leaderboard-panel {
+    width: 96vw;
+    padding: 16px;
+  }
+
+  .leaderboard-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+Makefile:
+SHELL := /bin/bash
+
+# Absolute project root
+PROJECT_ROOT := ~/city_fog_map
+VENV := $(PROJECT_ROOT)/.venv
+
+.PHONY: help venv backend backend-debug backend-wo-auth tunnel tunnel-status password kill
+
+help:
+	@echo "Targets:"
+	@echo "  venv           - create venv and install requirements"
+	@echo "  backend        - run FastAPI (uvicorn) attached on :8000"
+	@echo "  backend-debug  - run backend with DEBUG_AUTH_MODE=1 (auth demo only)"
+	@echo "  tunnel         - run LocalTunnel attached to :8000 (use SUBDOMAIN=foo to request subdomain)"
+	@echo "  tunnel-status  - check tunnel status and get URL"
+	@echo "  password       - print LocalTunnel password (public IP)"
+	@echo "  kill           - stop all project processes and clean temporary files"
+
+venv:
+	@test -d $(VENV) || python3 -m venv $(VENV)
+	@source $(VENV)/bin/activate && pip install -r $(PROJECT_ROOT)/requirements.txt
+
+backend: venv
+	@test -n "$$TELEGRAM_BOT_TOKEN" || (echo "TELEGRAM_BOT_TOKEN is required" && exit 1)
+	@echo "Running backend (uvicorn) on :8000 (attached)"
+	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+backend-debug: venv
+backend-wo-auth: venv
+	@test -n "$$TELEGRAM_BOT_TOKEN" || (echo "TELEGRAM_BOT_TOKEN is required" && exit 1)
+	@echo "Running backend with NO_AUTH_MODE=1 on :8000 (attached)"
+	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env NO_AUTH_MODE=1 TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
+	@echo "Running backend in DEBUG_AUTH_MODE=1 on :8000 (attached)"
+	cd $(PROJECT_ROOT); source $(VENV)/bin/activate; exec env DEBUG_AUTH_MODE=1 TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+tunnel:
+	@pkill -f "localtunnel --port 8000" || true
+	@rm -f /tmp/lt.log /tmp/lt_url.txt
+	@command -v npx >/dev/null 2>&1 || (echo "npx is required. Install Node: sudo apt-get install -y nodejs npm OR use nvm" && exit 1)
+	@echo "Running localtunnel to :8000 (attached)"
+	@if [ -n "$$SUBDOMAIN" ]; then \
+		echo "Requesting subdomain: $$SUBDOMAIN"; \
+		npx --yes localtunnel --port 8000 --local-host 127.0.0.1 -s "$$SUBDOMAIN" > /tmp/lt.log 2>&1 & \
+	else \
+		npx --yes localtunnel --port 8000 --local-host 127.0.0.1 > /tmp/lt.log 2>&1 & \
+	fi
+	@echo "Tunnel started in background. Use 'make tunnel-status' to check status."
+
+tunnel-status:
+	@URL=$$(grep -Eo "https://[a-z0-9-]+\\.loca\\.lt" /tmp/lt.log | head -n 1); \
+	if [ -n "$$URL" ]; then \
+		echo "Tunnel ready: $$URL"; \
+		echo "$$URL" > /tmp/lt_url.txt; \
+	else \
+		echo "Tunnel not ready yet. Check /tmp/lt.log for details."; \
+		ps aux | grep localtunnel | grep -v grep || echo "No localtunnel process running."; \
+	fi
+
+password:
+	@curl -s https://loca.lt/mytunnelpassword; echo
+
+kill:
+	@echo "Stopping all project processes..."
+	@pkill -f "uvicorn.*app.main:app" || true
+	@pkill -f "localtunnel.*--port 8000" || true
+	@rm -f /tmp/lt.log /tmp/lt_url.txt
+	@echo "Checking if port 8000 is free..."
+	@lsof -i :8000 >/dev/null 2>&1 || echo "Port 8000 is free"
+	@echo "All processes stopped and temporary files cleaned."
+	@exit 0
+
