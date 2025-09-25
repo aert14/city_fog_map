@@ -7,10 +7,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, List, Dict
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
-from fastapi import FastAPI, Depends, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi import FastAPI, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -18,7 +18,6 @@ import h3
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as db_module
-from . import utils
 
 
 # Configure logging
@@ -100,21 +99,226 @@ class VisitRequest(BaseModel):
 class Circle(BaseModel):
     lat: float
     lon: float
-    radius_m: int = 100
+
+
+class RegionStats(BaseModel):
+    id: int
+    visited_cells: int
+    visited_weight: float
+
+
+class VisitStats(BaseModel):
+    total_circles: int
+    district: Optional[RegionStats] = None
+    okrug: Optional[RegionStats] = None
 
 
 class VisitResponse(BaseModel):
     added: int
     circle: Circle
-    stats: Dict[str, int]
+    stats: VisitStats
 
 
 class CirclesResponse(BaseModel):
     hexagons: List[str]
 
 
-class RadiusRequest(BaseModel):
-    radius_m: int = Field(..., ge=1, le=1000)
+class ProgressBreakdown(BaseModel):
+    visited_cells: int
+    total_cells: int
+    percent: float
+    percent_cells: float = 0.0
+    percent_weight: float = 0.0
+    visited_weight: float = 0.0
+    total_weight: float = 0.0
+
+
+class DistrictFeatureResponse(BaseModel):
+    id: int
+    name: str
+    level: Literal["okrug", "district"]
+    parent_id: Optional[int] = None
+    bbox: Optional[List[float]] = None
+    geom: Dict[str, Any]
+    progress: ProgressBreakdown
+
+
+class DistrictCellResponse(BaseModel):
+    h3: str
+    coverage: float
+    visited: bool
+    total_children: Optional[int] = None
+    visited_children: Optional[int] = None
+    visited_fraction: Optional[float] = None
+
+
+class DistrictCellsResponse(BaseModel):
+    district_id: int
+    resolution: int
+    base_resolution: int
+    cells: List[DistrictCellResponse]
+
+
+class OkrugSummaryEntry(BaseModel):
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    progress: ProgressBreakdown
+
+
+class DistrictSummaryEntry(BaseModel):
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    parent_name: Optional[str] = None
+    progress: ProgressBreakdown
+
+
+class StatsSummaryResponse(BaseModel):
+    total: ProgressBreakdown
+    okrugs: List[OkrugSummaryEntry]
+    bottom_districts: List[DistrictSummaryEntry]
+
+
+class LeaderboardEntry(BaseModel):
+    rank: int
+    user_id: int
+    username: Optional[str]
+    visited_cells: int
+    visited_weight: float
+    percent_cells: float
+    percent_weight: float
+
+
+class LeaderboardResponse(BaseModel):
+    level: Literal["district", "okrug"]
+    period: Literal["week", "season"]
+    generated_at: datetime
+    entries: List[LeaderboardEntry]
+
+
+def _parse_bbox(bbox: str) -> Tuple[float, float, float, float]:
+    try:
+        min_lon_str, min_lat_str, max_lon_str, max_lat_str = bbox.split(",")
+        min_lon, min_lat = float(min_lon_str), float(min_lat_str)
+        max_lon, max_lat = float(max_lon_str), float(max_lat_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad bbox")
+
+    if min_lon > max_lon or min_lat > max_lat:
+        raise HTTPException(status_code=400, detail="bad bbox order")
+    return min_lon, min_lat, max_lon, max_lat
+
+
+def _progress_from_counts(
+    visited_cells: int,
+    total_cells: int,
+    *,
+    visited_weight: float = 0.0,
+    total_weight: float = 0.0,
+) -> ProgressBreakdown:
+    percent_cells = 0.0
+    percent_weight = 0.0
+
+    if total_cells > 0:
+        percent_cells = round((visited_cells / total_cells) * 100.0, 2)
+
+    if total_weight > 0:
+        percent_weight = round((visited_weight / total_weight) * 100.0, 2)
+
+    return ProgressBreakdown(
+        visited_cells=int(visited_cells),
+        total_cells=int(total_cells),
+        percent=percent_cells,
+        percent_cells=percent_cells,
+        percent_weight=percent_weight,
+        visited_weight=float(visited_weight),
+        total_weight=float(total_weight),
+    )
+
+
+def _parse_res_view(res_view: Optional[str], base_resolution: int) -> int:
+    if not res_view:
+        return base_resolution
+    try:
+        candidate = int(res_view.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad res_view")
+
+    if candidate < 0:
+        raise HTTPException(status_code=400, detail="bad res_view")
+    if candidate > base_resolution:
+        raise HTTPException(status_code=400, detail="res_view must be <= base resolution")
+    return candidate
+
+
+def _build_cells_payload(
+    base_cells: List[Tuple[str, float]],
+    visited: Set[str],
+    base_resolution: int,
+    target_resolution: int,
+) -> List[DistrictCellResponse]:
+    if target_resolution >= base_resolution:
+        target_resolution = base_resolution
+
+    if target_resolution == base_resolution:
+        cells: List[DistrictCellResponse] = []
+        for h3_index, coverage in base_cells:
+            is_visited = h3_index in visited
+            cells.append(
+                DistrictCellResponse(
+                    h3=h3_index,
+                    coverage=round(float(coverage), 6),
+                    visited=is_visited,
+                    total_children=1,
+                    visited_children=1 if is_visited else 0,
+                    visited_fraction=1.0 if is_visited else 0.0,
+                )
+            )
+        cells.sort(key=lambda c: c.h3)
+        return cells
+
+    aggregated: Dict[str, Dict[str, Any]] = {}
+    for h3_index, coverage in base_cells:
+        try:
+            parent_h3 = h3.cell_to_parent(h3_index, target_resolution)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Failed to compute parent for %s at res %s: %s", h3_index, target_resolution, exc)
+            parent_h3 = h3_index
+
+        bucket = aggregated.setdefault(
+            parent_h3,
+            {
+                "coverage_sum": 0.0,
+                "total_children": 0,
+                "visited_children": 0,
+            },
+        )
+        bucket["coverage_sum"] += float(coverage)
+        bucket["total_children"] += 1
+        if h3_index in visited:
+            bucket["visited_children"] += 1
+
+    cells: List[DistrictCellResponse] = []
+    for parent_h3, bucket in aggregated.items():
+        total_children = bucket["total_children"] or 1
+        visited_children = bucket["visited_children"]
+        coverage_avg = bucket["coverage_sum"] / total_children
+        visited_fraction = visited_children / total_children
+        cells.append(
+            DistrictCellResponse(
+                h3=parent_h3,
+                coverage=round(min(1.0, coverage_avg), 6),
+                visited=visited_children > 0,
+                total_children=total_children,
+                visited_children=visited_children,
+                visited_fraction=round(visited_fraction, 6),
+            )
+        )
+
+    cells.sort(key=lambda c: c.h3)
+    return cells
+
 
 def _get_user_from_session(request: Request) -> Optional[Tuple[int, Optional[str]]]:
     if request.session.get("tg_authenticated") and request.session.get("tg_user_id"):
@@ -125,12 +329,18 @@ def _get_user_from_session(request: Request) -> Optional[Tuple[int, Optional[str
 
             conn = db_module.get_connection()
             user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
-            logger.info(f"User authenticated via session: user_id={user_id}, tg_id={tg_id}, username={username}")
+            logger.info(
+                "User authenticated via session: user_id=%s, tg_id=%s, username=%s",
+                user_id,
+                tg_id,
+                username,
+            )
             return user_id, username
         except (ValueError, TypeError):
             logger.warning("Invalid user data in session", exc_info=True)
             return None
     return None
+
 
 def _get_user_from_header(telegram_init: str) -> Tuple[int, Optional[str]]:
     if not TELEGRAM_BOT_TOKEN:
@@ -155,11 +365,19 @@ def _get_user_from_header(telegram_init: str) -> Tuple[int, Optional[str]]:
 
     conn = db_module.get_connection()
     user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
-    logger.info(f"User authenticated via header: user_id={user_id}, tg_id={tg_id}, username={username}")
+    logger.info(
+        "User authenticated via header: user_id=%s, tg_id=%s, username=%s",
+        user_id,
+        tg_id,
+        username,
+    )
     return user_id, username
 
 
-async def get_current_user(request: Request, telegram_init: Optional[str] = Header(default=None, alias="X-Telegram-Init")) -> Tuple[int, Optional[str]]:
+async def get_current_user(
+    request: Request,
+    telegram_init: Optional[str] = Header(default=None, alias="X-Telegram-Init"),
+) -> Tuple[int, Optional[str]]:
     logger.info("Authenticating user")
 
     if NO_AUTH_MODE:
@@ -287,6 +505,12 @@ def on_startup() -> None:
 @app.get("/webapp/")
 async def webapp_index() -> Response:
     html = _read_index_with_version()
+    injection = f'<script>window.__CITY_FOG_BASE_RESOLUTION__ = {db_module.BASE_VISIT_RESOLUTION};</script>'
+    marker = '<script src="/webapp/app.js"></script>'
+    if marker in html:
+        html = html.replace(marker, f"{injection}\n    {marker}")
+    else:
+        html = f"{html}\n{injection}"
     headers = {"Cache-Control": "no-store"}
     return Response(content=html, media_type="text/html; charset=utf-8", headers=headers)
 
@@ -307,20 +531,54 @@ async def visit_area(body: VisitRequest, user=Depends(get_current_user)):
 
     lat, lon = float(body.lat), float(body.lon)
 
-    user_resolution = db_module.get_user_h3_resolution(conn, user_id)
-    user_radius = db_module.get_user_radius(conn, user_id)
+    geokey = h3.latlng_to_cell(lat, lon, db_module.BASE_VISIT_RESOLUTION)
 
-    logger.info(f"Visit quantization: H3_RESOLUTION={user_resolution}, radius_m={user_radius}")
-    geokey = h3.latlng_to_cell(lat, lon, user_resolution)
+    district_row = db_module.select_district_for_cell(conn, geokey)
+    if not district_row:
+        logger.info(f"Visit ignored: no district for geokey={geokey}")
+        stats_dict = db_module.fetch_user_stats(conn, user_id=user_id, district_id=None, okrug_id=None)
+        stats = VisitStats(
+            total_circles=stats_dict["total_circles"],
+            district=None,
+            okrug=None,
+        )
+        return VisitResponse(
+            added=0,
+            circle=Circle(lat=lat, lon=lon),
+            stats=stats,
+        )
 
-    added = db_module.insert_circle_if_new(conn, user_id=user_id, geokey=geokey, lat=lat, lon=lon, radius_m=user_radius)
-    total = db_module.count_circles(conn, user_id=user_id)
+    district_id, coverage = district_row
+    okrug_id = db_module.select_district_parent(conn, district_id)
 
-    logger.info(f"Visit processed: added={added}, total_circles={total}, geokey={geokey}")
+    added = db_module.record_visit_and_increment_stats(
+        conn,
+        user_id=user_id,
+        h3_index=geokey,
+        district_id=district_id,
+        coverage=coverage,
+        okrug_id=okrug_id,
+    )
+
+    stats_dict = db_module.fetch_user_stats(
+        conn,
+        user_id=user_id,
+        district_id=district_id,
+        okrug_id=okrug_id,
+    )
+    stats = VisitStats(
+        total_circles=stats_dict["total_circles"],
+        district=RegionStats(**stats_dict["district"]) if stats_dict.get("district") else None,
+        okrug=RegionStats(**stats_dict["okrug"]) if stats_dict.get("okrug") else None,
+    )
+
+    logger.info(
+        f"Visit processed: added={added}, district_id={district_id}, okrug_id={okrug_id}, geokey={geokey}, coverage={coverage:.3f}"
+    )
     return VisitResponse(
         added=1 if added else 0,
-        circle=Circle(lat=lat, lon=lon, radius_m=user_radius),
-        stats={"total_circles": total},
+        circle=Circle(lat=lat, lon=lon),
+        stats=stats,
     )
 
 
@@ -339,8 +597,14 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="bad bbox")
 
     conn = db_module.get_connection()
-    rows = db_module.select_circles_in_bbox(conn, user_id=user_id, min_lat=min_lat, min_lon=min_lon, max_lat=max_lat, max_lon=max_lon)
-    hexagons = [r[3] for r in rows]  # geokey is at index 3
+    hexagons = db_module.select_user_hexes_in_bbox(
+        conn,
+        user_id=user_id,
+        min_lat=min_lat,
+        min_lon=min_lon,
+        max_lat=max_lat,
+        max_lon=max_lon,
+    )
 
     logger.info(f"Circles response: {len(hexagons)} hexagons returned")
     return CirclesResponse(hexagons=hexagons)
@@ -354,33 +618,8 @@ class DeleteCircleRequest(BaseModel):
 async def delete_circle(body: DeleteCircleRequest, user=Depends(get_current_user)):
     user_id, _ = user
     conn = db_module.get_connection()
-    deleted = db_module.delete_circle_by_geokey(conn, user_id=user_id, geokey=body.geokey)
+    deleted = db_module.delete_visit_by_hex(conn, user_id=user_id, h3_index=body.geokey)
     return {"deleted": int(deleted)}
-
-
-@app.post("/api/v1/radius")
-async def set_radius(body: RadiusRequest, user=Depends(get_current_user)):
-    user_id, _ = user
-    conn = db_module.get_connection()
-    radius_m = int(body.radius_m)
-
-    h3_resolution = utils.radius_to_h3_resolution(radius_m)
-
-    old_resolution = db_module.get_user_h3_resolution(conn, user_id)
-    resolution_changed = old_resolution != h3_resolution
-
-    updated = db_module.update_radius_and_resolution_for_user(
-        conn, user_id=user_id, radius_m=radius_m, h3_resolution=h3_resolution
-    )
-
-    if resolution_changed:
-        cleared_count = db_module.clear_user_circles(conn, user_id)
-        logger.info(
-            f"Cleared {cleared_count} circles for user {user_id} due to H3 resolution change "
-            f"from {old_resolution} to {h3_resolution}"
-        )
-
-    return {"updated": updated, "h3_resolution": h3_resolution, "resolution_changed": resolution_changed}
 
 
 # -------------------------
@@ -433,7 +672,8 @@ async def debug_mode():
     """Return debug mode status for frontend"""
     return {
         "debug_auth_mode": DEBUG_AUTH_MODE,
-        "no_auth_mode": NO_AUTH_MODE
+        "no_auth_mode": NO_AUTH_MODE,
+        "base_visit_resolution": db_module.BASE_VISIT_RESOLUTION,
     }
 
 
@@ -446,5 +686,298 @@ async def dev_clear_db():
     cleared_circles, cleared_users = db_module.clear_all(conn)
     logger.warning(f"DEV clear-db executed: circles={cleared_circles}, users={cleared_users}")
     return {"cleared_circles": int(cleared_circles), "cleared_users": int(cleared_users)}
+
+
+@app.get(
+    "/api/v1/districts",
+    response_model=List[DistrictFeatureResponse],
+)
+async def list_districts(
+    bbox: str = Query(..., description="minLon,minLat,maxLon,maxLat"),
+    level: Literal["okrug", "district"] = Query(
+        "district", description="Administrative level to return"
+    ),
+    user=Depends(get_current_user),
+):
+    user_id, _ = user
+    min_lon, min_lat, max_lon, max_lat = _parse_bbox(bbox)
+    conn = db_module.get_connection()
+    rows = db_module.fetch_districts_in_bbox(
+        conn,
+        user_id=user_id,
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        level=level,
+    )
+
+    features: List[DistrictFeatureResponse] = []
+    for row in rows:
+        bbox_values: Optional[List[float]] = None
+        if (
+            row["bbox_min_lon"] is not None
+            and row["bbox_min_lat"] is not None
+            and row["bbox_max_lon"] is not None
+            and row["bbox_max_lat"] is not None
+        ):
+            bbox_values = [
+                float(row["bbox_min_lon"]),
+                float(row["bbox_min_lat"]),
+                float(row["bbox_max_lon"]),
+                float(row["bbox_max_lat"]),
+            ]
+
+        geom_raw = row["geom_geojson"]
+        geom_payload: Dict[str, Any]
+        try:
+            geom_payload = json.loads(geom_raw) if geom_raw else {}
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode geometry for district %s", row["id"])
+            geom_payload = {}
+
+        total_cells = int(row["total_cells"]) if row["total_cells"] is not None else 0
+        total_weight = float(row["total_weight"]) if row["total_weight"] is not None else 0.0
+        visited_cells = (
+            int(row["user_visited_cells"]) if row["user_visited_cells"] is not None else 0
+        )
+        visited_weight = (
+            float(row["user_visited_weight"]) if row["user_visited_weight"] is not None else 0.0
+        )
+
+        progress = _progress_from_counts(
+            visited_cells=visited_cells,
+            total_cells=total_cells,
+            visited_weight=visited_weight,
+            total_weight=total_weight,
+        )
+
+        parent_id = row["parent_id"]
+        features.append(
+            DistrictFeatureResponse(
+                id=int(row["id"]),
+                name=str(row["name_ru"]),
+                level=str(row["level"]),
+                parent_id=int(parent_id) if parent_id is not None else None,
+                bbox=bbox_values,
+                geom=geom_payload,
+                progress=progress,
+            )
+        )
+
+    return features
+
+
+@app.get(
+    "/api/v1/district/{district_id}/cells",
+    response_model=DistrictCellsResponse,
+)
+async def get_district_cells(
+    district_id: int,
+    res_view: Optional[str] = Query(
+        None, description="Optional H3 resolution to aggregate to (<= base)"
+    ),
+    user=Depends(get_current_user),
+):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    district_row = db_module.get_district_by_id(conn, district_id)
+    if not district_row:
+        raise HTTPException(status_code=404, detail="district not found")
+
+    base_cells = db_module.fetch_district_cells(conn, district_id)
+    if base_cells:
+        base_resolution = h3.get_resolution(base_cells[0][0])
+    else:
+        base_resolution = db_module.BASE_VISIT_RESOLUTION
+
+    visited_cells = set(
+        db_module.fetch_user_visited_cells_for_district(
+            conn, user_id=user_id, district_id=district_id
+        )
+    )
+
+    target_resolution = _parse_res_view(res_view, base_resolution)
+    cells_payload = _build_cells_payload(
+        base_cells,
+        visited_cells,
+        base_resolution,
+        target_resolution,
+    )
+
+    return DistrictCellsResponse(
+        district_id=district_id,
+        resolution=target_resolution,
+        base_resolution=base_resolution,
+        cells=cells_payload,
+    )
+
+
+@app.post("/api/v1/district/{district_id}/reveal")
+async def reveal_district(
+    district_id: int,
+    payload: Dict[str, Any],
+    user=Depends(get_current_user),
+):
+    user_id, _ = user
+    if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    conn = db_module.get_connection()
+    district_row = db_module.get_district_by_id(conn, district_id)
+    if not district_row:
+        raise HTTPException(status_code=404, detail="district not found")
+
+    base_cells = db_module.fetch_district_cells(conn, district_id)
+    if not base_cells:
+        return {"new_hexagons": []}
+
+    okrug_id = db_module.select_district_parent(conn, district_id)
+
+    requested_cells = set()
+    if isinstance(payload, dict):
+        cells = payload.get("cells")
+        if isinstance(cells, list):
+            requested_cells = {str(cell) for cell in cells}
+
+    new_hexagons: List[str] = []
+    already_visited = set(
+        db_module.fetch_user_visited_cells_for_district(
+            conn, user_id=user_id, district_id=district_id
+        )
+    )
+
+    for h3_index, coverage in base_cells:
+        if requested_cells and h3_index not in requested_cells:
+            continue
+        added = db_module.record_visit_and_increment_stats(
+            conn,
+            user_id=user_id,
+            h3_index=h3_index,
+            district_id=district_id,
+            coverage=coverage,
+            okrug_id=okrug_id,
+        )
+        if added:
+            new_hexagons.append(h3_index)
+
+    return {"new_hexagons": new_hexagons}
+
+
+@app.get("/api/v1/stats/summary", response_model=StatsSummaryResponse)
+async def get_stats_summary(user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+
+    totals = db_module.fetch_user_total_progress(conn, user_id=user_id)
+    total_progress = _progress_from_counts(
+        visited_cells=int(totals["visited_cells"]),
+        total_cells=int(totals["total_cells"]),
+        visited_weight=float(totals["visited_weight"]),
+        total_weight=float(totals["total_weight"]),
+    )
+
+    okrug_rows = db_module.fetch_user_okrug_progress(conn, user_id=user_id)
+    okrugs: List[OkrugSummaryEntry] = []
+    for row in okrug_rows:
+        okrugs.append(
+            OkrugSummaryEntry(
+                id=int(row["id"]),
+                name=str(row["name_ru"]),
+                parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
+                progress=_progress_from_counts(
+                    visited_cells=int(row["visited_cells"]) if row["visited_cells"] is not None else 0,
+                    total_cells=int(row["total_cells"]) if row["total_cells"] is not None else 0,
+                    visited_weight=float(row["visited_weight"]) if row["visited_weight"] is not None else 0.0,
+                    total_weight=float(row["total_weight"]) if row["total_weight"] is not None else 0.0,
+                ),
+            )
+        )
+
+    bottom_rows = db_module.fetch_user_bottom_districts(conn, user_id=user_id, limit=3)
+    bottom_districts: List[DistrictSummaryEntry] = []
+    for row in bottom_rows:
+        bottom_districts.append(
+            DistrictSummaryEntry(
+                id=int(row["id"]),
+                name=str(row["name_ru"]),
+                parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
+                parent_name=str(row["parent_name"]) if row["parent_name"] is not None else None,
+                progress=_progress_from_counts(
+                    visited_cells=int(row["visited_cells"]) if row["visited_cells"] is not None else 0,
+                    total_cells=int(row["total_cells"]) if row["total_cells"] is not None else 0,
+                    visited_weight=float(row["visited_weight"]) if row["visited_weight"] is not None else 0.0,
+                    total_weight=float(row["total_weight"]) if row["total_weight"] is not None else 0.0,
+                ),
+            )
+        )
+
+    return StatsSummaryResponse(
+        total=total_progress,
+        okrugs=okrugs,
+        bottom_districts=bottom_districts,
+    )
+
+
+@app.get("/api/v1/leaderboard", response_model=LeaderboardResponse)
+async def get_leaderboard(
+    level: Literal["district", "okrug"] = Query(
+        "district", description="Aggregation level"),
+    period: Literal["week", "season"] = Query(
+        "week", description="Leaderboard period"),
+    limit: int = Query(10, ge=1, le=100, description="Number of entries to return"),
+    user=Depends(get_current_user),
+):
+    _ = user  # currently unused but validates auth
+
+    conn = db_module.get_connection()
+    total_cells, total_weight = db_module.get_total_cells_and_weight(conn, level=level)
+
+    if total_cells <= 0 and total_weight <= 0:
+        return LeaderboardResponse(
+            level=level,
+            period=period,
+            generated_at=datetime.now(timezone.utc),
+            entries=[],
+        )
+
+    rows = db_module.fetch_leaderboard(
+        conn,
+        level=level,
+        period=period,
+        limit=limit,
+    )
+
+    entries: List[LeaderboardEntry] = []
+    for idx, row in enumerate(rows, start=1):
+        visited_cells = int(row["visited_cells"] or 0)
+        visited_weight = float(row["visited_weight"] or 0.0)
+
+        percent_cells = 0.0
+        if total_cells > 0:
+            percent_cells = round((visited_cells / total_cells) * 100.0, 2)
+
+        percent_weight = 0.0
+        if total_weight > 0:
+            percent_weight = round((visited_weight / total_weight) * 100.0, 2)
+
+        entries.append(
+            LeaderboardEntry(
+                rank=idx,
+                user_id=int(row["user_id"]),
+                username=row["username"],
+                visited_cells=visited_cells,
+                visited_weight=visited_weight,
+                percent_cells=percent_cells,
+                percent_weight=percent_weight,
+            )
+        )
+
+    return LeaderboardResponse(
+        level=level,
+        period=period,
+        generated_at=datetime.now(timezone.utc),
+        entries=entries,
+    )
 
 
