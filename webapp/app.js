@@ -1150,31 +1150,24 @@
   }
 
   async function revealEntireDistrict(districtId) {
-    const areaKm2 = getFeatureAreaKm2(selectedDistrictFeature);
-    const desiredRes = pickResByArea(areaKm2);
-    const cacheKey = `${districtId}@${desiredRes}`;
-    let cached = districtCellsCache.get(cacheKey);
-    if (!cached) {
-      await fetchDistrictCells(districtId, desiredRes);
-      cached = districtCellsCache.get(cacheKey);
-    }
-    const meta = cached?.meta;
+    // Always fetch cells with the server's base resolution to get all cells
+    const serverBaseResolution = window.__CITY_FOG_BASE_RESOLUTION__ || 9;
+    const detailed = await fetchDistrictCellsRaw(
+      districtId,
+      serverBaseResolution,
+    );
+    const meta = detailed.payload || detailed.meta;
     if (!meta || !Array.isArray(meta.cells) || meta.cells.length === 0) {
-      throw new Error("No cells cached for district");
+      throw new Error("No cells available for district");
     }
 
-    let revealCells = meta.cells;
-    if (desiredRes < BASE_DISTRICT_RESOLUTION) {
-      const detailed = await fetchDistrictCellsRaw(
-        districtId,
-        BASE_DISTRICT_RESOLUTION,
-      );
-      revealCells =
-        detailed.meta?.cells || detailed.payload?.cells || revealCells;
-    }
+    const revealCells = meta.cells;
 
     await revealDistrictViaVisits(revealCells);
 
+    // Refresh the display after revealing
+    const areaKm2 = getFeatureAreaKm2(selectedDistrictFeature);
+    const desiredRes = pickResByArea(areaKm2);
     await Promise.all([
       updateHexagonsFromServer(),
       fetchDistrictCells(districtId, desiredRes),
