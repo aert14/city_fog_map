@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 # Absolute project root
-PROJECT_ROOT := ~/city_fog_map
+PROJECT_ROOT := /Users/aaivanov/city_fog_map
 
 .PHONY: help up down build logs tunnel tunnel-status password kill clean
 
@@ -36,28 +36,30 @@ logs:
 	cd $(PROJECT_ROOT); docker-compose logs -f
 
 tunnel:
-	@pkill -f "localtunnel --port 80" || true
+	@pkill -f "localtunnel.*--port 80" || true
 	@rm -f /tmp/lt.log /tmp/lt_url.txt
 	@command -v npx >/dev/null 2>&1 || (echo "npx is required. Install Node: sudo apt-get install -y nodejs npm OR use nvm" && exit 1)
+	@echo "Checking if port 80 is accessible..."
+	@curl -s --max-time 5 http://localhost >/dev/null || (echo "ERROR: Port 80 is not accessible. Make sure services are running with 'make up'" && exit 1)
 	@echo "Running localtunnel to :80 (attached)"
-	@if [ -n "$$SUBDOMAIN" ]; then \
-		echo "Requesting subdomain: $$SUBDOMAIN"; \
-		SUBDOMAIN="$$SUBDOMAIN"; \
-	else \
-		echo "Using default subdomain: aert0"; \
-		SUBDOMAIN="aert0"; \
-	fi; \
+	@SUBDOMAIN=$${SUBDOMAIN:-aert0}; \
+	echo "Using subdomain: $$SUBDOMAIN"; \
 	npx --yes localtunnel --port 80 --local-host 127.0.0.1 -s "$$SUBDOMAIN" > /tmp/lt.log 2>&1 &
 	@echo "Tunnel started in background. Use 'make tunnel-status' to check status."
 
 tunnel-status:
-	@URL=$$(grep -Eo "https://[a-z0-9-]+\\.loca\\.lt" /tmp/lt.log | head -n 1); \
-	if [ -n "$$URL" ]; then \
-		echo "Tunnel ready: $$URL"; \
-		echo "$$URL" > /tmp/lt_url.txt; \
+	@if ps aux | grep -q "localtunnel.*--port 80" && [ -f /tmp/lt.log ]; then \
+		URL=$$(grep -Eo "https://[a-z0-9-]+\\.loca\\.lt" /tmp/lt.log | head -n 1); \
+		if [ -n "$$URL" ]; then \
+			echo "Tunnel ready: $$URL"; \
+			echo "$$URL" > /tmp/lt_url.txt; \
+		else \
+			echo "Tunnel starting... Check /tmp/lt.log for details."; \
+			tail -5 /tmp/lt.log | head -3; \
+		fi; \
 	else \
-		echo "Tunnel not ready yet. Check /tmp/lt.log for details."; \
-		ps aux | grep localtunnel | grep -v grep || echo "No localtunnel process running."; \
+		echo "No localtunnel process running."; \
+		echo "Start tunnel with: make tunnel"; \
 	fi
 
 password:
@@ -67,10 +69,7 @@ kill:
 	@echo "Stopping tunnel..."
 	@pkill -f "localtunnel.*--port 80" || true
 	@rm -f /tmp/lt.log /tmp/lt_url.txt
-	@echo "Checking if port 80 is free..."
-	@lsof -i :80 >/dev/null 2>&1 || echo "Port 80 is free"
 	@echo "Tunnel stopped and temporary files cleaned."
-	@exit 0
 
 clean:
 	@echo "Removing all containers and volumes..."
