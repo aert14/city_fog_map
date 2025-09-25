@@ -166,7 +166,7 @@ def main():
 
     try:
         # Initialize Redis pool (for cache invalidation)
-        cache.init_redis_pool()
+        cache.init_redis_sync()
 
         # Connect to RabbitMQ
         connection = get_rabbitmq_connection()

@@ -59,3 +59,31 @@ def get_redis_sync() -> Optional[redis.Redis]:
     except Exception as e:
         logger.error(f"Failed to create sync Redis client: {e}")
         return None
+
+
+def init_redis_sync() -> None:
+    """Синхронная инициализация Redis для использования в синхронном коде"""
+    global redis_client
+
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        logger.warning("REDIS_URL not set, Redis caching will be disabled")
+        return
+
+    try:
+        import asyncio
+        # Создаем новый event loop для async операций
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _init():
+            global redis_client
+            redis_client = Redis.from_url(redis_url)
+            await redis_client.ping()
+            logger.info("Redis connection established successfully")
+
+        loop.run_until_complete(_init())
+        loop.close()
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {e}")
+        redis_client = None
