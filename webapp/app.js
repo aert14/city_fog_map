@@ -403,7 +403,7 @@
           "fill-color": "#0ea5e9",
           "fill-opacity": 0.05,
         },
-        maxzoom: 12,
+        maxzoom: 18,
       });
     }
 
@@ -437,7 +437,7 @@
           "fill-color": "#38bdf8",
           "fill-opacity": 0.08,
         },
-        maxzoom: 12,
+        maxzoom: 18,
         layout: {
           visibility: "visible",
         },
