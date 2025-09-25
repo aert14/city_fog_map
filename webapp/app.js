@@ -400,10 +400,11 @@
         type: "fill",
         source: ADMIN_SOURCES.okrugs,
         paint: {
-          "fill-color": "#0ea5e9",
+          "fill-color": "#10b981",
           "fill-opacity": 0.05,
         },
-        maxzoom: 18,
+        minzoom: 7,
+        maxzoom: 10,
       });
     }
 
@@ -437,7 +438,8 @@
           "fill-color": "#38bdf8",
           "fill-opacity": 0.08,
         },
-        maxzoom: 18,
+        minzoom: 9,
+        maxzoom: 11,
         layout: {
           visibility: "visible",
         },
