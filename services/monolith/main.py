@@ -636,7 +636,14 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         logger.error(f"Invalid bbox format: {bbox}, error: {e}")
         raise HTTPException(status_code=400, detail="bad bbox")
 
+    logger.info(f"Parsed bbox: min_lon={min_lon}, min_lat={min_lat}, max_lon={max_lon}, max_lat={max_lat}")
+
     conn = db_module.get_connection()
+
+    # Debug: get all user hexagons first
+    all_user_hexagons = db_module.select_user_hexes(conn, user_id)
+    logger.info(f"User {user_id} has {len(all_user_hexagons)} total hexagons")
+
     hexagons = db_module.select_user_hexes_in_bbox(
         conn,
         user_id=user_id,
@@ -646,7 +653,9 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         max_lon=max_lon,
     )
 
-    logger.info(f"Circles response: {len(hexagons)} hexagons returned")
+    logger.info(f"Circles response: {len(hexagons)} hexagons returned in bbox")
+    if len(hexagons) > 0:
+        logger.info(f"Sample hexagons: {hexagons[:3]}")
     return CirclesResponse(hexagons=hexagons)
 
 

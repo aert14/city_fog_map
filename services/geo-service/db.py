@@ -1,4 +1,5 @@
 import os
+import time
 import psycopg2
 import psycopg2.extras
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -9,7 +10,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set")
 
-BASE_VISIT_RESOLUTION = 9
+BASE_VISIT_RESOLUTION = 10
 PRIMARY_COVERAGE_THRESHOLD = 0.5
 
 _CONNECTION: Optional[psycopg2.extensions.connection] = None
@@ -39,24 +40,36 @@ def get_connection() -> psycopg2.extensions.connection:
 
 
 def ensure_user(conn: psycopg2.extensions.connection, tg_id: int, username: Optional[str]) -> int:
-    with conn.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
-        row = cur.fetchone()
-        if row:
-            user_id = int(row[0])
-            if username:
-                cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
-                conn.commit()
-            return user_id
+    """Ensure user exists, with retry logic for deadlock handling."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
+                row = cur.fetchone()
+                if row:
+                    user_id = int(row[0])
+                    if username:
+                        cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
+                        conn.commit()
+                    return user_id
 
-        cur.execute(
-            "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
-            (tg_id, username),
-        )
-        user_id = cur.fetchone()[0]
-        cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
-        conn.commit()
-        return user_id
+                cur.execute(
+                    "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
+                    (tg_id, username),
+                )
+                user_id = cur.fetchone()[0]
+                cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+                conn.commit()
+                return user_id
+        except psycopg2.errors.DeadlockDetected:
+            if attempt < max_retries - 1:
+                # Wait a bit and retry
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                # Re-raise the exception if all retries failed
+                raise
 
 
 def init_db(conn: psycopg2.extensions.connection) -> None:
@@ -145,19 +158,17 @@ def select_user_hexes_in_bbox(
     max_lon: float,
 ) -> List[str]:
     """Select user hexagons within a bounding box using spatial query for efficiency."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT h3 FROM user_visits_atomic
-            WHERE user_id = %s
-              AND geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
-            """,
-            (user_id, min_lon, min_lat, max_lon, max_lat),
-        )
-        hexagons = [str(row[0]) for row in cur.fetchall()]
+    # This function is inefficient and should be replaced with a spatial query if it were used.
+    # For now, keeping the logic but on Postgres.
+    hexagons: List[str] = []
+    for h3_index in select_user_hexes(conn, user_id):
+        lat, lon = h3.cell_to_latlng(h3_index)
+        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+            hexagons.append(h3_index)
 
-    # Aggregate hexagons to parent indices for network optimization
-    return aggregate_hexagons(hexagons)
+    # TODO: Fix aggregation to work with actual data resolution
+    # For now, return hexagons as-is to ensure frontend gets the data
+    return hexagons
 
 
 def fetch_districts_in_bbox(
@@ -510,6 +521,79 @@ def fetch_all_districts_with_user_progress(
         results.extend([dict(row) for row in cur.fetchall()])
 
         return results
+
+
+def record_visit_and_increment_stats(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    district_id: int,
+    coverage: float,
+    okrug_id: Optional[int],
+    now_ts: Optional[int] = None,
+) -> bool:
+    ts = int(now_ts if now_ts is not None else time.time())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_visits_atomic(user_id, h3, ts)
+            VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+            """,
+            (user_id, h3_index, ts),
+        )
+        added = cur.rowcount > 0
+        if not added:
+            conn.rollback()
+            return False
+
+        increment_cell = 1 if coverage >= PRIMARY_COVERAGE_THRESHOLD else 0
+
+        _update_statistic(
+            cur,
+            table="user_district_stats",
+            key_field="district_id",
+            user_id=user_id,
+            region_id=district_id,
+            increment_cell=increment_cell,
+            coverage=coverage,
+        )
+
+        if okrug_id is not None:
+            _update_statistic(
+                cur,
+                table="user_okrug_stats",
+                key_field="okrug_id",
+                user_id=user_id,
+                region_id=okrug_id,
+                increment_cell=increment_cell,
+                coverage=coverage,
+            )
+
+    conn.commit()
+    return True
+
+
+def _update_statistic(
+    cur: psycopg2.extensions.cursor,
+    *,
+    table: str,
+    key_field: str,
+    user_id: int,
+    region_id: int,
+    increment_cell: int,
+    coverage: float,
+) -> None:
+    cur.execute(
+        f"""
+        INSERT INTO {table} (user_id, {key_field}, visited_cells, visited_weight)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT(user_id, {key_field}) DO UPDATE SET
+            visited_cells = {table}.visited_cells + %s,
+            visited_weight = {table}.visited_weight + %s
+        """,
+        (user_id, region_id, increment_cell, coverage, increment_cell, coverage),
+    )
 
 
 def fetch_leaderboard(

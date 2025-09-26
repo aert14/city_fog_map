@@ -672,7 +672,10 @@ async def list_circles(bbox: str, user_id: int = Depends(get_current_user)):
         logger.error(f"Invalid bbox format: {bbox}, error: {e}")
         raise HTTPException(status_code=400, detail="bad bbox")
 
+    logger.info(f"Parsed bbox: min_lon={min_lon}, min_lat={min_lat}, max_lon={max_lon}, max_lat={max_lat}")
+
     conn = db_module.get_connection()
+
     hexagons = db_module.select_user_hexes_in_bbox(
         conn,
         user_id=user_id,
@@ -860,3 +863,53 @@ async def get_leaderboard(
             logger.warning(f"Error writing to Redis cache: {e}")
 
     return response
+
+
+@app.post("/api/v1/district/{district_id}/reveal")
+async def reveal_district(
+    district_id: int,
+    payload: Dict[str, Any],
+    user_id: int = Depends(get_current_user),
+):
+    if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    conn = db_module.get_connection()
+    district_row = db_module.get_district_by_id(conn, district_id)
+    if not district_row:
+        raise HTTPException(status_code=404, detail="district not found")
+
+    base_cells = db_module.fetch_district_cells(conn, district_id)
+    if not base_cells:
+        return {"new_hexagons": []}
+
+    okrug_id = district_row.get("parent_id")
+
+    requested_cells = set()
+    if isinstance(payload, dict):
+        cells = payload.get("cells")
+        if isinstance(cells, list):
+            requested_cells = {str(cell) for cell in cells}
+
+    new_hexagons: List[str] = []
+    already_visited = set(
+        db_module.fetch_user_visited_cells_for_district(
+            conn, user_id=user_id, district_id=district_id
+        )
+    )
+
+    for h3_index, coverage in base_cells:
+        if requested_cells and h3_index not in requested_cells:
+            continue
+        added = db_module.record_visit_and_increment_stats(
+            conn,
+            user_id=user_id,
+            h3_index=h3_index,
+            district_id=district_id,
+            coverage=coverage,
+            okrug_id=okrug_id,
+        )
+        if added:
+            new_hexagons.append(h3_index)
+
+    return {"new_hexagons": new_hexagons}
