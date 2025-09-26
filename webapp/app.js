@@ -1256,10 +1256,11 @@
     if (!response.ok) {
       throw new Error(`Server error: ${response.statusText}`);
     }
-    const result = await response.json();
-
-    // Extract h3_geokey from response and immediately update UI
-    const h3Geokey = result.h3_geokey;
+    // 1. Calculate H3 geokey locally from the coordinates
+    const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
+    const h3Geokey = h3.latLngToCell(lat, lng, h3Resolution);
+    // 2. Send request to server (API call remains the same)
+    const result = await response.json(); // <-- `result` is now used only for stats update, not for `h3_geokey`
     if (h3Geokey && !allKnownHexagons.has(h3Geokey)) {
       allKnownHexagons.add(h3Geokey);
       addToSpatialIndex(h3Geokey);
