@@ -84,29 +84,6 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
     conn.commit()
 
 
-def get_connection() -> psycopg2.extensions.connection:
-    global _CONNECTION
-    if _CONNECTION is None or _CONNECTION.closed:
-        _CONNECTION = psycopg2.connect(DATABASE_URL)
-
-    # Check if connection is in a failed transaction state
-    if _CONNECTION and not _CONNECTION.closed:
-        try:
-            # Test the connection and rollback any failed transaction
-            with _CONNECTION.cursor() as test_cur:
-                test_cur.execute("SELECT 1")
-        except psycopg2.Error:
-            # If there's an error, rollback and try to recover
-            try:
-                _CONNECTION.rollback()
-            except:
-                # If rollback fails, close and reconnect
-                _CONNECTION.close()
-                _CONNECTION = psycopg2.connect(DATABASE_URL)
-
-    return _CONNECTION
-
-
 def count_user_visited_hexes(conn: psycopg2.extensions.connection, user_id: int) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -126,6 +103,38 @@ def select_user_hexes(conn: psycopg2.extensions.connection, user_id: int) -> Lis
         return [str(row[0]) for row in cur.fetchall()]
 
 
+def aggregate_hexagons(all_user_hexes: List[str]) -> List[str]:
+    """Aggregate hexagons to parent indices for network optimization.
+
+    Groups child hexagons into parent hexagons if all children of a parent are present.
+    Returns a mixed set of hexagons at different resolutions.
+    """
+    if not all_user_hexes:
+        return []
+
+    resolution_to_group_at = BASE_VISIT_RESOLUTION - 2
+    parents = {}
+
+    for hex_id in all_user_hexes:
+        parent = h3.cell_to_parent(hex_id, resolution_to_group_at)
+        if parent not in parents:
+            parents[parent] = set()
+        parents[parent].add(hex_id)
+
+    final_hexes = set()
+    for parent, children in parents.items():
+        # Check if all children of this parent are present
+        expected_children_count = h3.cell_to_children_size(parent, BASE_VISIT_RESOLUTION)
+        if len(children) == expected_children_count:
+            # All children are present, add parent instead
+            final_hexes.add(parent)
+        else:
+            # Not all children, add them individually
+            final_hexes.update(children)
+
+    return list(final_hexes)
+
+
 def select_user_hexes_in_bbox(
     conn: psycopg2.extensions.connection,
     *,
@@ -135,14 +144,20 @@ def select_user_hexes_in_bbox(
     max_lat: float,
     max_lon: float,
 ) -> List[str]:
-    # This function is inefficient and should be replaced with a spatial query if it were used.
-    # For now, keeping the logic but on Postgres.
-    hexagons: List[str] = []
-    for h3_index in select_user_hexes(conn, user_id):
-        lat, lon = h3.cell_to_latlng(h3_index)
-        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
-            hexagons.append(h3_index)
-    return hexagons
+    """Select user hexagons within a bounding box using spatial query for efficiency."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT h3 FROM user_visits_atomic
+            WHERE user_id = %s
+              AND geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+            """,
+            (user_id, min_lon, min_lat, max_lon, max_lat),
+        )
+        hexagons = [str(row[0]) for row in cur.fetchall()]
+
+    # Aggregate hexagons to parent indices for network optimization
+    return aggregate_hexagons(hexagons)
 
 
 def fetch_districts_in_bbox(

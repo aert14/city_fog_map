@@ -1149,9 +1149,35 @@
       });
       if (!response.ok)
         throw new Error(`Network error: ${response.statusText}`);
-      const data = await response.json();
+      const textData = await response.text();
+      const receivedHexagons = textData ? textData.split(' ') : [];
+
+      // Expand aggregated hexagons back to base resolution
+      const expandedHexagons = new Set();
+      receivedHexagons.forEach((hexId) => {
+        if (!hexId) return; // Skip empty strings
+        const resolution = h3.getResolution(hexId);
+        if (resolution === defaultVisitResolution) {
+          // Base resolution, add directly
+          expandedHexagons.add(hexId);
+        } else if (resolution < defaultVisitResolution) {
+          // Aggregated parent, expand to children
+          try {
+            const children = h3.cellToChildren(hexId, defaultVisitResolution);
+            children.forEach(childHex => expandedHexagons.add(childHex));
+          } catch (e) {
+            console.warn(`Failed to expand hexagon ${hexId}:`, e);
+            // Fallback: add the parent as-is if expansion fails
+            expandedHexagons.add(hexId);
+          }
+        } else {
+          // Higher resolution than base (unexpected), add as-is
+          expandedHexagons.add(hexId);
+        }
+      });
+
       let newHexagons = 0;
-      data.hexagons.forEach((hexId) => {
+      expandedHexagons.forEach((hexId) => {
         if (!allKnownHexagons.has(hexId)) {
           allKnownHexagons.add(hexId);
           addToSpatialIndex(hexId);

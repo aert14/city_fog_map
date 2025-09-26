@@ -596,7 +596,7 @@ async def get_district_cells(
     )
 
 
-@app.get("/api/v1/circles", response_model=CirclesResponse)
+@app.get("/api/v1/circles")
 async def list_circles(bbox: str, user_id: int = Depends(get_current_user)):
     logger.info(f"Circles request: bbox={bbox}, user_id={user_id}")
 
@@ -619,7 +619,7 @@ async def list_circles(bbox: str, user_id: int = Depends(get_current_user)):
     )
 
     logger.info(f"Circles response: {len(hexagons)} hexagons returned")
-    return CirclesResponse(hexagons=hexagons)
+    return Response(content=' '.join(hexagons), media_type="text/plain")
 
 
 @app.get("/api/v1/stats/summary", response_model=StatsSummaryResponse)

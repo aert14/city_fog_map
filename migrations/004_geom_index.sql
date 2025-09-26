@@ -16,9 +16,5 @@ CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_geom ON user_visits_atomic USI
 
 -- Update existing records to populate geom from h3 coordinates
 -- This will backfill geometry data for existing records
-UPDATE user_visits_atomic
-SET geom = ST_SetSRID(ST_Point(
-    ST_X(ST_Centroid(ST_GeomFromText('POINT(' || ST_AsText(ST_PointFromH3(h3)) || ')', 4326))),
-    ST_Y(ST_Centroid(ST_GeomFromText('POINT(' || ST_AsText(ST_PointFromH3(h3)) || ')', 4326)))
-), 4326)
-WHERE geom IS NULL;
+-- Note: This backfill may be slow for large datasets and should be run manually if needed
+-- For now, we'll leave existing records without geom (they will be updated when re-visited)

@@ -340,13 +340,18 @@ def record_visit_atomic_only(
 ) -> bool:
     """Record visit in user_visits_atomic table only. Returns True if INSERT succeeded (new visit)."""
     ts = int(now_ts if now_ts is not None else time.time())
+
+    # Calculate the center coordinates of the H3 cell
+    lat, lon = h3.cell_to_latlng(h3_index)
+    point_wkt = f'POINT({lon} {lat})'
+
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO user_visits_atomic(user_id, h3, ts)
-            VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+            INSERT INTO user_visits_atomic(user_id, h3, ts, geom)
+            VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 4326)) ON CONFLICT DO NOTHING
             """,
-            (user_id, h3_index, ts),
+            (user_id, h3_index, ts, point_wkt),
         )
         added = cur.rowcount > 0
     conn.commit()
@@ -364,13 +369,18 @@ def record_visit_and_increment_stats(
     now_ts: Optional[int] = None,
 ) -> bool:
     ts = int(now_ts if now_ts is not None else time.time())
+
+    # Calculate the center coordinates of the H3 cell
+    lat, lon = h3.cell_to_latlng(h3_index)
+    point_wkt = f'POINT({lon} {lat})'
+
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO user_visits_atomic(user_id, h3, ts)
-            VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+            INSERT INTO user_visits_atomic(user_id, h3, ts, geom)
+            VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 4326)) ON CONFLICT DO NOTHING
             """,
-            (user_id, h3_index, ts),
+            (user_id, h3_index, ts, point_wkt),
         )
         added = cur.rowcount > 0
         if not added:
