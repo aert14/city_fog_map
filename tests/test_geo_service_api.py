@@ -174,6 +174,68 @@ class GeoServiceAPITestCase(unittest.TestCase):
         response = self.client.get("/api/v1/districts?bbox=invalid&level=district")
         self.assertEqual(response.status_code, 400)
 
+    def test_list_all_districts_success(self):
+        """Test listing all districts and okrugs"""
+        response = self.client.get("/api/v1/districts/all")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsInstance(data, list)
+        self.assertEqual(len(data), 2)  # One okrug and one district
+
+        # Check that we have both levels
+        levels = [item["level"] for item in data]
+        self.assertIn("district", levels)
+        self.assertIn("okrug", levels)
+
+        # Check district data
+        district_data = next(item for item in data if item["level"] == "district")
+        self.assertEqual(district_data["name"], "Test District")
+        self.assertEqual(district_data["id"], 100)
+        self.assertIsNotNone(district_data["progress"])
+        self.assertEqual(district_data["progress"]["total_cells"], 2)
+        self.assertEqual(district_data["progress"]["total_weight"], 1.5)
+
+        # Check okrug data
+        okrug_data = next(item for item in data if item["level"] == "okrug")
+        self.assertEqual(okrug_data["name"], "Test Okrug")
+        self.assertEqual(okrug_data["id"], 10)
+        self.assertIsNotNone(okrug_data["progress"])
+        # Okrug should have aggregated stats from child districts
+        self.assertEqual(okrug_data["progress"]["total_cells"], 2)
+        self.assertEqual(okrug_data["progress"]["total_weight"], 1.5)
+
+    def test_fetch_all_districts_with_user_progress_db_function(self):
+        """Test the database function directly"""
+        from app import db as db_module
+        conn = db_module.get_connection()
+        rows = db_module.fetch_all_districts_with_user_progress(conn, user_id=1)
+
+        self.assertIsInstance(rows, list)
+        self.assertEqual(len(rows), 2)  # One okrug and one district
+
+        # Check that we have both levels
+        levels = [row["level"] for row in rows]
+        self.assertIn("district", levels)
+        self.assertIn("okrug", levels)
+
+        # Check district data
+        district_row = next(row for row in rows if row["level"] == "district")
+        self.assertEqual(district_row["name_ru"], "Test District")
+        self.assertEqual(district_row["id"], 100)
+        self.assertEqual(district_row["total_cells"], 2)
+        self.assertEqual(district_row["total_weight"], 1.5)
+        self.assertEqual(district_row["user_visited_cells"], 0)  # No visits in test data
+        self.assertEqual(district_row["user_visited_weight"], 0.0)
+
+        # Check okrug data
+        okrug_row = next(row for row in rows if row["level"] == "okrug")
+        self.assertEqual(okrug_row["name_ru"], "Test Okrug")
+        self.assertEqual(okrug_row["id"], 10)
+        self.assertEqual(okrug_row["total_cells"], 2)  # Aggregated from child district
+        self.assertEqual(okrug_row["total_weight"], 1.5)
+        self.assertEqual(okrug_row["user_visited_cells"], 0)  # No visits in test data
+        self.assertEqual(okrug_row["user_visited_weight"], 0.0)
+
     def test_get_district_cells_success(self):
         """Test getting district cells"""
         response = self.client.get("/api/v1/district/100/cells")

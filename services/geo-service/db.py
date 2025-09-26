@@ -431,6 +431,87 @@ def get_total_cells_and_weight(
         return int(row["total_cells"] or 0), float(row["total_weight"] or 0.0)
 
 
+def fetch_all_districts_with_user_progress(
+    conn: psycopg2.extensions.connection, user_id: int
+) -> List[Dict[str, Any]]:
+    """Fetch all districts and okrugs with user progress statistics."""
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # First, handle districts (level = 'district')
+        district_sql = """
+            SELECT
+                d.id,
+                d.level,
+                d.name_ru,
+                d.parent_id,
+                ST_AsGeoJSON(d.geom) as geom_geojson,
+                d.bbox_min_lon,
+                d.bbox_min_lat,
+                d.bbox_max_lon,
+                d.bbox_max_lat,
+                d.total_cells,
+                d.total_weight,
+                COALESCE(s.visited_cells, 0) AS user_visited_cells,
+                COALESCE(s.visited_weight, 0.0) AS user_visited_weight
+            FROM districts AS d
+            LEFT JOIN user_district_stats AS s ON s.district_id = d.id AND s.user_id = %s
+            WHERE d.level = 'district'
+            ORDER BY d.name_ru
+        """
+
+        # Handle okrugs (level = 'okrug') with aggregated stats from child districts
+        okrug_sql = """
+            SELECT
+                d.id,
+                d.level,
+                d.name_ru,
+                d.parent_id,
+                ST_AsGeoJSON(d.geom) as geom_geojson,
+                d.bbox_min_lon,
+                d.bbox_min_lat,
+                d.bbox_max_lon,
+                d.bbox_max_lat,
+                COALESCE(child_totals.total_cells, d.total_cells, 0) AS total_cells,
+                COALESCE(child_totals.total_weight, d.total_weight, 0.0) AS total_weight,
+                COALESCE(s.visited_cells, 0) AS user_visited_cells,
+                COALESCE(s.visited_weight, 0.0) AS user_visited_weight
+            FROM districts AS d
+            LEFT JOIN (
+                SELECT parent_id AS okrug_id,
+                       SUM(total_cells) AS total_cells,
+                       SUM(total_weight) AS total_weight
+                FROM districts
+                WHERE level = 'district'
+                GROUP BY parent_id
+            ) AS child_totals ON child_totals.okrug_id = d.id
+            LEFT JOIN (
+                SELECT
+                    child.parent_id AS okrug_id,
+                    COALESCE(SUM(uds.visited_cells), 0) AS visited_cells,
+                    COALESCE(SUM(uds.visited_weight), 0.0) AS visited_weight
+                FROM districts AS child
+                LEFT JOIN user_district_stats AS uds
+                    ON uds.district_id = child.id AND uds.user_id = %s
+                WHERE child.level = 'district' AND child.parent_id IS NOT NULL
+                GROUP BY child.parent_id
+            ) AS s ON s.okrug_id = d.id
+            WHERE d.level = 'okrug'
+            ORDER BY d.name_ru
+        """
+
+        # Execute both queries and combine results
+        results = []
+
+        # Districts
+        cur.execute(district_sql, (user_id,))
+        results.extend([dict(row) for row in cur.fetchall()])
+
+        # Okrugs
+        cur.execute(okrug_sql, (user_id,))
+        results.extend([dict(row) for row in cur.fetchall()])
+
+        return results
+
+
 def fetch_leaderboard(
     conn: psycopg2.extensions.connection,
     *,

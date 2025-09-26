@@ -6,7 +6,7 @@ let __lastRenderMs = 0;
 let __lastRenderState = null;
 
 // --- UPDATED drawFog function ---
-function drawFog(fogCtx, map, fogEnabled, spatialIndex, animationTime, FOG_CONFIG, DPR, cloudPattern, GRID_SIZE) {
+function drawFog(fogCtx, map, fogEnabled, spatialIndex, animationTime, FOG_CONFIG, DPR, cloudPattern, GRID_SIZE, fogDataChanged) {
   const width = fogCtx.canvas.clientWidth || fogCtx.canvas.width / DPR;
   const height = fogCtx.canvas.clientHeight || fogCtx.canvas.height / DPR;
 
@@ -19,6 +19,7 @@ function drawFog(fogCtx, map, fogEnabled, spatialIndex, animationTime, FOG_CONFI
 
   if (
     !isMoving &&
+    !fogDataChanged &&
     __lastRenderState &&
     Math.abs(center.lng - __lastRenderState.lng) < 0.00001 &&
     Math.abs(center.lat - __lastRenderState.lat) < 0.00001 &&

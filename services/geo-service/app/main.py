@@ -553,6 +553,70 @@ async def list_districts(
 
 
 @app.get(
+    "/api/v1/districts/all",
+    response_model=List[DistrictFeatureResponse],
+)
+async def list_all_districts(user_id: int = Depends(get_current_user)):
+    conn = db_module.get_connection()
+    rows = db_module.fetch_all_districts_with_user_progress(conn, user_id=user_id)
+
+    features: List[DistrictFeatureResponse] = []
+    for row in rows:
+        bbox_values: Optional[List[float]] = None
+        if (
+            row["bbox_min_lon"] is not None
+            and row["bbox_min_lat"] is not None
+            and row["bbox_max_lon"] is not None
+            and row["bbox_max_lat"] is not None
+        ):
+            bbox_values = [
+                float(row["bbox_min_lon"]),
+                float(row["bbox_min_lat"]),
+                float(row["bbox_max_lon"]),
+                float(row["bbox_max_lat"]),
+            ]
+
+        geom_raw = row["geom_geojson"]
+        geom_payload: Dict[str, Any]
+        try:
+            geom_payload = json.loads(geom_raw) if geom_raw else {}
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode geometry for district %s", row["id"])
+            geom_payload = {}
+
+        total_cells = int(row["total_cells"]) if row["total_cells"] is not None else 0
+        total_weight = float(row["total_weight"]) if row["total_weight"] is not None else 0.0
+        visited_cells = (
+            int(row["user_visited_cells"]) if row["user_visited_cells"] is not None else 0
+        )
+        visited_weight = (
+            float(row["user_visited_weight"]) if row["user_visited_weight"] is not None else 0.0
+        )
+
+        progress = _progress_from_counts(
+            visited_cells=visited_cells,
+            total_cells=total_cells,
+            visited_weight=visited_weight,
+            total_weight=total_weight,
+        )
+
+        parent_id = row["parent_id"]
+        features.append(
+            DistrictFeatureResponse(
+                id=int(row["id"]),
+                name=str(row["name_ru"]),
+                level=str(row["level"]),
+                parent_id=int(parent_id) if parent_id is not None else None,
+                bbox=bbox_values,
+                geom=geom_payload,
+                progress=progress,
+            )
+        )
+
+    return features
+
+
+@app.get(
     "/api/v1/district/{district_id}/cells",
     response_model=DistrictCellsResponse,
 )

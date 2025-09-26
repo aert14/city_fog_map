@@ -55,6 +55,29 @@ class VisitRequest(BaseModel):
     lon: float
 
 
+class Circle(BaseModel):
+    lat: float
+    lon: float
+
+
+class RegionStats(BaseModel):
+    id: int
+    visited_cells: int
+    visited_weight: float
+
+
+class VisitStats(BaseModel):
+    total_circles: int
+    district: Optional[RegionStats] = None
+    okrug: Optional[RegionStats] = None
+
+
+class VisitResponse(BaseModel):
+    added: int
+    circle: Circle
+    stats: VisitStats
+
+
 class VisitAcceptedResponse(BaseModel):
     status: str = "accepted"
     h3_geokey: str
@@ -116,9 +139,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 Instrumentator().instrument(app).expose(app)
 
-@app.post("/api/v1/visit", response_model=VisitAcceptedResponse)
+@app.post("/api/v1/visit", response_model=VisitResponse)
 async def visit_area(request: Request, body: VisitRequest):
-    """Handle visit requests - simplified version that only records atomic visits"""
+    """Handle visit requests - records atomic visits and returns stats"""
     try:
         # For simplicity, get user_id from header
         # In production, this should be proper auth
@@ -135,34 +158,75 @@ async def visit_area(request: Request, body: VisitRequest):
     lat, lon = float(body.lat), float(body.lon)
     geokey = h3.latlng_to_cell(lat, lon, db_module.BASE_VISIT_RESOLUTION)
 
-    # Perform atomic INSERT OR IGNORE into user_visits_atomic
     conn = db_module.get_connection()
-    added = db_module.record_visit_atomic_only(conn, user_id=user_id, h3_index=geokey)
 
-    # If this is a new visit (INSERT succeeded), publish message to queue
-    if added:
-        message = {
-            "user_id": user_id,
-            "h3_geokey": geokey,
-            "lat": lat,
-            "lon": lon,
-            "timestamp": int(time.time())
-        }
+    # Get district info
+    district_row = db_module.select_district_for_cell(conn, geokey)
+    if not district_row:
+        logger.info(f"Visit ignored: no district for geokey={geokey}")
+        stats_dict = db_module.fetch_user_stats(conn, user_id=user_id, district_id=None, okrug_id=None)
+        stats = VisitStats(
+            total_circles=stats_dict["total_circles"],
+            district=None,
+            okrug=None,
+        )
+        return VisitResponse(
+            added=0,
+            circle=Circle(lat=lat, lon=lon),
+            stats=stats,
+        )
 
-        try:
-            connection = get_rabbitmq_connection()
-            channel = connection.channel()
-            publish_visit_message(channel, message)
-            connection.close()
-        except Exception as e:
-            logger.error(f"Failed to publish visit message: {e}")
-            # Note: We don't fail the request if queue publishing fails
-            # The visit is still recorded atomically
+    district_id, coverage = district_row
+    okrug_id = db_module.select_district_parent(conn, district_id)
 
-    # Always return success with the geokey
-    # This gives immediate feedback to frontend
-    logger.info(f"Visit processed: added={added}, geokey={geokey}")
-    return VisitAcceptedResponse(status="accepted", h3_geokey=geokey)
+    # Perform visit recording and stats increment
+    added = db_module.record_visit_and_increment_stats(
+        conn,
+        user_id=user_id,
+        h3_index=geokey,
+        district_id=district_id,
+        coverage=coverage,
+        okrug_id=okrug_id,
+    )
+
+    # Publish message to queue for any additional processing
+    message = {
+        "user_id": user_id,
+        "h3_geokey": geokey,
+        "lat": lat,
+        "lon": lon,
+        "timestamp": int(time.time())
+    }
+
+    try:
+        connection = get_rabbitmq_connection()
+        channel = connection.channel()
+        publish_visit_message(channel, message)
+        connection.close()
+    except Exception as e:
+        logger.error(f"Failed to publish visit message: {e}")
+        # Note: We don't fail the request if queue publishing fails
+
+    # Get updated stats
+    stats_dict = db_module.fetch_user_stats(
+        conn,
+        user_id=user_id,
+        district_id=district_id,
+        okrug_id=okrug_id,
+    )
+    stats = VisitStats(
+        total_circles=stats_dict["total_circles"],
+        district=RegionStats(**stats_dict["district"]) if stats_dict.get("district") else None,
+        okrug=RegionStats(**stats_dict["okrug"]) if stats_dict.get("okrug") else None,
+    )
+
+    # Always return success with stats
+    logger.info(f"Visit processed: added={added}, district_id={district_id}, okrug_id={okrug_id}, geokey={geokey}")
+    return VisitResponse(
+        added=1 if added else 0,
+        circle=Circle(lat=lat, lon=lon),
+        stats=stats,
+    )
 
 
 @app.get("/health")

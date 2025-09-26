@@ -120,6 +120,7 @@
   // --- NEW: Spatial Index for Hexagons ---
   const spatialIndex = new Map();
   const GRID_SIZE = 0.25; // Size of the grid cell in degrees. Tune if needed.
+  let fogDataChanged = false; // Flag to track changes in fog data
 
   function getGridKey(lat, lng) {
     const gridX = Math.floor(lng / GRID_SIZE);
@@ -136,6 +137,7 @@
         spatialIndex.set(key, new Set());
       }
       spatialIndex.get(key).add(hexId);
+      fogDataChanged = true; // Mark data as changed
     } catch (e) {
       console.warn(`Failed to add hex ${hexId} to spatial index`, e);
     }
@@ -151,6 +153,7 @@
         if (spatialIndex.get(key).size === 0) {
           spatialIndex.delete(key);
         }
+        fogDataChanged = true; // Mark data as changed
       }
     } catch (e) {
       console.warn(`Failed to remove hex ${hexId} from spatial index`, e);
@@ -384,6 +387,90 @@
         : null;
 
     return weightLabel;
+  }
+
+  function updateDistrictProgress(districtStats, okrugStats) {
+    let needsRedraw = false;
+
+    // Update district stats
+    if (districtStats && typeof districtStats.id === "number") {
+      const districtId = districtStats.id;
+      const districtFeature = districtFeatureMap.get(districtId);
+      if (districtFeature) {
+        // Update progress properties
+        if (typeof districtStats.visited_cells === "number") {
+          districtFeature.properties.visited_cells = districtStats.visited_cells;
+        }
+        if (typeof districtStats.visited_weight === "number") {
+          districtFeature.properties.visited_weight = districtStats.visited_weight;
+        }
+
+        // Calculate percentages if we have the data
+        const totalCells = districtFeature.properties.total_cells;
+        const totalWeight = districtFeature.properties.total_weight;
+        if (typeof totalCells === "number" && totalCells > 0) {
+          districtFeature.properties.percent_cells = Math.min(100, (districtStats.visited_cells / totalCells) * 100);
+        }
+        if (typeof totalWeight === "number" && totalWeight > 0) {
+          districtFeature.properties.percent_weight = Math.min(100, (districtStats.visited_weight / totalWeight) * 100);
+        }
+
+        // Update overlay suffix for map display
+        districtFeature.properties.overlay_suffix = formatProgressSuffix(districtFeature);
+        needsRedraw = true;
+      }
+    }
+
+    // Update okrug stats
+    if (okrugStats && typeof okrugStats.id === "number") {
+      const okrugId = okrugStats.id;
+      const okrugFeature = okrugFeatureMap.get(okrugId);
+      if (okrugFeature) {
+        // Update progress properties
+        if (typeof okrugStats.visited_cells === "number") {
+          okrugFeature.properties.visited_cells = okrugStats.visited_cells;
+        }
+        if (typeof okrugStats.visited_weight === "number") {
+          okrugFeature.properties.visited_weight = okrugStats.visited_weight;
+        }
+
+        // Calculate percentages if we have the data
+        const totalCells = okrugFeature.properties.total_cells;
+        const totalWeight = okrugFeature.properties.total_weight;
+        if (typeof totalCells === "number" && totalCells > 0) {
+          okrugFeature.properties.percent_cells = Math.min(100, (okrugStats.visited_cells / totalCells) * 100);
+        }
+        if (typeof totalWeight === "number" && totalWeight > 0) {
+          okrugFeature.properties.percent_weight = Math.min(100, (okrugStats.visited_weight / totalWeight) * 100);
+        }
+
+        // Note: Okrugs don't have overlay_suffix in the current implementation
+        needsRedraw = true;
+      }
+    }
+
+    // Redraw map if any updates were made
+    if (needsRedraw) {
+      const districtSource = map.getSource(ADMIN_SOURCES.districts);
+      if (districtSource) {
+        districtSource.setData(toFeatureCollection(Array.from(districtFeatureMap.values())));
+      }
+
+      const okrugSource = map.getSource(ADMIN_SOURCES.okrugs);
+      if (okrugSource) {
+        okrugSource.setData(toFeatureCollection(Array.from(okrugFeatureMap.values())));
+      }
+
+      // Update status if currently selected district was affected
+      if (selectedDistrictId != null) {
+        const updatedFeature = districtFeatureMap.get(selectedDistrictId);
+        if (updatedFeature) {
+          selectedDistrictFeature = cloneFeature(updatedFeature);
+          selectedDistrictName = selectedDistrictFeature.properties?.name || selectedDistrictName;
+          updateStatusForSelection();
+        }
+      }
+    }
   }
 
   function ensureAdminSourcesAndLayers() {
@@ -635,9 +722,10 @@
 
   function mapDistrictApiFeature(raw) {
     if (!raw || !raw.geom) return null;
-    const percentCells =
-      raw.progress?.percent_cells ?? raw.progress?.percent ?? 0;
-    const percentWeight = raw.progress?.percent_weight ?? 0;
+    const percentCells = Math.min(100,
+      raw.progress?.percent_cells ?? raw.progress?.percent ?? 0);
+    const percentWeight = Math.min(100,
+      raw.progress?.percent_weight ?? 0);
     const feature = {
       type: "Feature",
       geometry: raw.geom,
@@ -656,6 +744,89 @@
       },
     };
     return feature;
+  }
+
+  function loadAllDistricts() {
+    if (!map || !map.isStyleLoaded()) return;
+    ensureAdminSourcesAndLayers();
+
+    if (adminFetchAbortController) {
+      adminFetchAbortController.abort();
+    }
+
+    const controller = new AbortController();
+    adminFetchAbortController = controller;
+    const currentSeq = ++adminRequestSeq;
+
+    fetch(`/api/v1/districts/all`, {
+      signal: controller.signal,
+      headers: getAuthHeaders({ Accept: "application/json" }),
+    })
+      .then(async (response) => {
+        if (controller.signal.aborted) return;
+        if (!response.ok)
+          throw new Error(`districts fetch failed: ${response.status}`);
+
+        const allDistrictsData = await response.json();
+
+        if (controller.signal.aborted || currentSeq !== adminRequestSeq) return;
+
+        const okrugFeatures = [];
+        okrugFeatureMap.clear();
+        const districtFeatures = [];
+        districtFeatureMap.clear();
+
+        allDistrictsData.forEach((raw) => {
+          const feature = mapDistrictApiFeature(raw);
+          if (feature) {
+            if (raw.level === 'okrug') {
+              okrugFeatures.push(feature);
+              okrugFeatureMap.set(raw.id, feature);
+            } else if (raw.level === 'district') {
+              getFeatureAreaKm2(feature); // Pre-calculate area
+              feature.properties.overlay_suffix = formatProgressSuffix(feature);
+              districtFeatures.push(feature);
+              districtFeatureMap.set(raw.id, feature);
+            }
+          }
+        });
+
+        const okrugSource = map.getSource(ADMIN_SOURCES.okrugs);
+        if (okrugSource) {
+          okrugSource.setData(toFeatureCollection(okrugFeatures));
+        }
+
+        const districtSource = map.getSource(ADMIN_SOURCES.districts);
+        if (districtSource) {
+          districtSource.setData(toFeatureCollection(districtFeatures));
+        }
+
+        if (selectedDistrictId != null) {
+          const updatedFeature = districtFeatureMap.get(selectedDistrictId);
+          if (updatedFeature) {
+            selectedDistrictFeature = cloneFeature(updatedFeature);
+            selectedDistrictName =
+              selectedDistrictFeature.properties?.name || selectedDistrictName;
+            updateSelectedDistrictHighlight();
+            updateStatusForSelection();
+          } else {
+            clearDistrictSelection();
+            updateDistrictHexLayer(emptyFeatureCollection);
+            if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
+          }
+        } else if (!statusOverrideMessage) {
+          setStatus(DEFAULT_STATUS_TEXT);
+        }
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        console.warn("[admin] Failed to load all districts:", error);
+      })
+      .finally(() => {
+        if (controller === adminFetchAbortController) {
+          adminFetchAbortController = null;
+        }
+      });
   }
 
   function refreshAdminLayers() {
@@ -830,11 +1001,11 @@
       if (cached.meta?.district?.progress) {
         const progress = cached.meta.district.progress;
         const percentCells = progress.percent_cells ?? progress.percent;
-        selectedDistrictFeature.properties.percent_cells =
-          percentCells ?? selectedDistrictFeature.properties.percent_cells;
-        selectedDistrictFeature.properties.percent_weight =
+        selectedDistrictFeature.properties.percent_cells = Math.min(100,
+          percentCells ?? selectedDistrictFeature.properties.percent_cells);
+        selectedDistrictFeature.properties.percent_weight = Math.min(100,
           progress.percent_weight ??
-          selectedDistrictFeature.properties.percent_weight;
+          selectedDistrictFeature.properties.percent_weight);
         updateStatusForSelection();
       }
       return;
@@ -850,11 +1021,11 @@
       if (cachedForRes.meta?.district?.progress) {
         const progress = cachedForRes.meta.district.progress;
         const percentCells = progress.percent_cells ?? progress.percent;
-        selectedDistrictFeature.properties.percent_cells =
-          percentCells ?? selectedDistrictFeature.properties.percent_cells;
-        selectedDistrictFeature.properties.percent_weight =
+        selectedDistrictFeature.properties.percent_cells = Math.min(100,
+          percentCells ?? selectedDistrictFeature.properties.percent_cells);
+        selectedDistrictFeature.properties.percent_weight = Math.min(100,
           progress.percent_weight ??
-          selectedDistrictFeature.properties.percent_weight;
+          selectedDistrictFeature.properties.percent_weight);
         updateStatusForSelection();
       }
       return;
@@ -902,13 +1073,13 @@
         if (selectedDistrictId === districtId) {
           selectedDistrictResView = resValue;
           if (payload?.district?.progress) {
-            selectedDistrictFeature.properties.percent_cells =
+            selectedDistrictFeature.properties.percent_cells = Math.min(100,
               payload.district.progress.percent_cells ??
               payload.district.progress.percent ??
-              selectedDistrictFeature.properties.percent_cells;
-            selectedDistrictFeature.properties.percent_weight =
+              selectedDistrictFeature.properties.percent_cells);
+            selectedDistrictFeature.properties.percent_weight = Math.min(100,
               payload.district.progress.percent_weight ??
-              selectedDistrictFeature.properties.percent_weight;
+              selectedDistrictFeature.properties.percent_weight);
             
             const existingFeature = districtFeatureMap.get(districtId);
             if (existingFeature) {
@@ -1061,8 +1232,19 @@
       FOG_CONFIG,
       DPR,
       cloudPattern,
-      GRID_SIZE // Pass grid size to the module
+      GRID_SIZE, // Pass grid size to the module
+      fogDataChanged // Pass data change flag
     );
+    fogDataChanged = false; // Reset the flag after drawing
+  }
+
+  // Force immediate fog redraw
+  function forceFogRedraw() {
+    if (!cloudPattern) return;
+    const wasChanged = fogDataChanged;
+    fogDataChanged = true; // Temporarily set to force redraw
+    drawFogLoop();
+    fogDataChanged = wasChanged; // Restore original state
   }
 
   async function addVisitAt(lat, lng) {
@@ -1081,11 +1263,21 @@
     if (h3Geokey && !allKnownHexagons.has(h3Geokey)) {
       allKnownHexagons.add(h3Geokey);
       addToSpatialIndex(h3Geokey);
-      map.triggerRepaint();
     }
 
-    // Note: We don't update the count here since stats are updated asynchronously
-    // The count will be updated when stats are refreshed from the server
+    // Update district progress with stats from response
+    if (result.stats) {
+      updateDistrictProgress(result.stats.district, result.stats.okrug);
+
+      // Update the main counter with server stats
+      countEl.textContent =
+        result.stats && typeof result.stats.total_circles === "number"
+          ? result.stats.total_circles.toLocaleString()
+          : allKnownHexagons.size.toLocaleString();
+    }
+
+    forceFogRedraw();
+    map.triggerRepaint();
 
     return result;
   }
@@ -1119,6 +1311,7 @@
       allKnownHexagons.delete(targetHexId);
       removeFromSpatialIndex(targetHexId);
       countEl.textContent = allKnownHexagons.size.toLocaleString();
+      forceFogRedraw();
       map.triggerRepaint();
       console.log("Deleted hexagon:", targetHexId);
     } else {
@@ -1187,6 +1380,7 @@
       if (newHexagons > 0) {
         countEl.textContent = allKnownHexagons.size.toLocaleString();
       }
+      forceFogRedraw();
       map.triggerRepaint();
     } catch (error) {
       console.error("[fog] Failed to fetch hexagons:", error);
@@ -1220,11 +1414,12 @@
       updateHexagonsFromServer(),
       fetchDistrictCells(districtId, desiredRes),
     ]);
-    refreshAdminLayers();
+    // Note: District layers are now loaded statically and don't need refresh
   }
 
   async function revealDistrictViaVisits(cells) {
     if (!Array.isArray(cells) || cells.length === 0) return;
+    let hasChanges = false;
     for (let i = 0; i < cells.length; i++) {
       const cell = cells[i];
       if (!cell || !cell.h3) continue;
@@ -1238,20 +1433,34 @@
         });
         if (response.ok) {
           const result = await response.json();
-          if (result.added > 0) {
+
+          // Add to known hexagons if not already there (sync with server state)
+          if (!allKnownHexagons.has(cell.h3)) {
             allKnownHexagons.add(cell.h3);
             addToSpatialIndex(cell.h3);
+            hasChanges = true;
+          }
+
+          if (result.added > 0) {
             const total =
               result.stats && typeof result.stats.total_circles === "number"
                 ? result.stats.total_circles
                 : allKnownHexagons.size;
             countEl.textContent = Number(total).toLocaleString();
-            map.triggerRepaint();
+          }
+
+          // Update district progress with stats from response (always, since stats may change)
+          if (result.stats) {
+            updateDistrictProgress(result.stats.district, result.stats.okrug);
           }
         }
       } catch (err) {
         console.warn("[debug] reveal visit failed", { cell: cell.h3, err });
       }
+    }
+    if (hasChanges) {
+      forceFogRedraw();
+      map.triggerRepaint();
     }
   }
 
@@ -1274,7 +1483,7 @@
     });
     resizeObserver.observe(mapContainer);
     updateHexagonsFromServer();
-    refreshAdminLayers();
+    loadAllDistricts();
     try {
       geolocate.trigger();
     } catch (e) {
@@ -1286,10 +1495,7 @@
 
   map.on("moveend", () => {
     updateHexagonsFromServer();
-    scheduleAdminRefresh();
   });
-  map.on("move", () => scheduleAdminRefresh(true));
-  map.on("zoomend", () => scheduleAdminRefresh());
   map.on("movestart", () => {
     ignoreNextClick = true;
   });
@@ -1358,7 +1564,13 @@
           result.stats && typeof result.stats.total_circles === "number"
             ? result.stats.total_circles.toLocaleString()
             : allKnownHexagons.size.toLocaleString();
+        forceFogRedraw();
         map.triggerRepaint();
+
+        // Update district progress with stats from response
+        if (result.stats) {
+          updateDistrictProgress(result.stats.district, result.stats.okrug);
+        }
       }
     } catch (error) {
       console.error("[visit] Failed to visit area:", error);
@@ -1482,7 +1694,9 @@
         const data = await res.json().catch(() => ({}));
         allKnownHexagons.clear();
         spatialIndex.clear(); // Clear the index too
+        fogDataChanged = true; // Mark data as changed
         countEl.textContent = "0";
+        forceFogRedraw();
         map.triggerRepaint();
         alert(
           `DB cleared. circles=${data.cleared_circles ?? "?"}, users=${data.cleared_users ?? "?"}`,
@@ -1511,7 +1725,8 @@
       const lngLat = map.unproject(e.point);
       addVisitAt(lngLat.lat, lngLat.lng)
         .then(() => {
-          scheduleAdminRefresh();
+          // Note: District progress update may be needed here in the future
+          // when districts are loaded statically
         })
         .catch((error) => {
           console.error("[visit] Failed to visit area:", error);
