@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import h3
 
 # Test database using SQLite
-BASE_VISIT_RESOLUTION = 9
+BASE_VISIT_RESOLUTION = 10
 PRIMARY_COVERAGE_THRESHOLD = 0.5
 
 _CONNECTION: Optional[sqlite3.Connection] = None

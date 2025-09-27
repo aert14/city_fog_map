@@ -96,7 +96,7 @@
   let fogEnabled = true;
   let animationTime = 0;
   const defaultVisitResolution =
-    baseVisitResolution || window.__CITY_FOG_BASE_RESOLUTION__ || 8;
+    baseVisitResolution || window.__CITY_FOG_BASE_RESOLUTION__ || 10;
   const BASE_DISTRICT_RESOLUTION = defaultVisitResolution;
   window.currentH3Resolution = defaultVisitResolution;
   let ignoreNextClick = false;
@@ -1394,7 +1394,7 @@
 
   async function revealEntireDistrict(districtId) {
     // Always fetch cells with the server's base resolution to get all cells
-    const serverBaseResolution = window.__CITY_FOG_BASE_RESOLUTION__ || 9;
+    const serverBaseResolution = window.__CITY_FOG_BASE_RESOLUTION__ || 10;
     const detailed = await fetchDistrictCellsRaw(
       districtId,
       serverBaseResolution,

@@ -19,7 +19,7 @@ from shapely.geometry.base import BaseGeometry
 
 LOG = logging.getLogger("import_data_to_postgres")
 
-BASE_RESOLUTION = 9
+BASE_RESOLUTION = 10
 MIN_PRIMARY_COVERAGE = 0.5
 
 

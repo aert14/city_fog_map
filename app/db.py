@@ -10,7 +10,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set")
 
-BASE_VISIT_RESOLUTION = 9
+BASE_VISIT_RESOLUTION = 10
 PRIMARY_COVERAGE_THRESHOLD = 0.5
 
 _CONNECTION: Optional[psycopg2.extensions.connection] = None
