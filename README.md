@@ -12,20 +12,32 @@ City Fog Map is a Telegram Mini App that allows users to "unfog" a map by explor
 
 ## Architecture
 
-The application consists of two main components:
+The application is built with a microservices architecture using Docker containers:
 
-1.  **Backend:** A Python-based backend powered by the FastAPI framework. It handles user authentication, API requests, and database interactions.
-2.  **Frontend:** A vanilla JavaScript single-page application that runs as a Telegram Mini App. It uses MapLibre GL for rendering the map and interacts with the backend via a REST API.
+1.  **Backend Services:** Multiple Python-based services powered by FastAPI:
+    - **monolith:** Main web service serving static files and API endpoints
+    - **geo-service:** Handles geospatial operations and H3 indexing
+    - **user-service:** Manages user authentication and sessions
+    - **visit-service:** Processes visit events via RabbitMQ message queue
+    - **stats-worker:** Background worker for statistics processing
 
-The database is a simple SQLite database, making the application self-contained and easy to set up.
+2.  **Frontend:** A vanilla JavaScript single-page application that runs as a Telegram Mini App. It uses MapLibre GL for rendering the map and interacts with the backend via REST APIs.
+
+3.  **Infrastructure:**
+    - **PostgreSQL with PostGIS:** Database for geospatial data
+    - **Redis:** Caching and session storage
+    - **RabbitMQ:** Message queue for async processing
+    - **Nginx:** Reverse proxy and load balancer
+
+The application uses Docker Compose for easy deployment and localtunnel for exposing the local development environment to the internet.
 
 ## Getting Started
 
 ### Prerequisites
 
-*   Python 3.8+
+*   Docker and Docker Compose
 *   A Telegram Bot Token (get one from [@BotFather](https://t.me/BotFather))
-*   A way to expose your local server to the internet (e.g., ngrok, localtunnel)
+*   Node.js with npm (for localtunnel, if not using Docker)
 
 ### Installation
 
@@ -36,14 +48,6 @@ The database is a simple SQLite database, making the application self-contained 
     cd city-fog-map
     ```
 
-2.  **Create a virtual environment and install dependencies:**
-
-    ```bash
-    python -m venv .venv
-    source .venv/bin/activate
-    pip install -r requirements.txt
-    ```
-
 ### Running the Application
 
 1.  **Set the Telegram Bot Token:**
@@ -52,27 +56,50 @@ The database is a simple SQLite database, making the application self-contained 
     export TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
     ```
 
-2.  **Run the backend server:**
+2.  **Start all services with Docker Compose:**
 
     ```bash
-    uvicorn app.main:app --host 0.0.0.0 --port 8000
+    make up
     ```
 
-3.  **Expose your local server to the internet:**
+    This will start all services including PostgreSQL, Redis, RabbitMQ, and the application services.
 
-    For example, using ngrok:
+3.  **Check that services are running:**
 
     ```bash
-    ngrok http 8000
+    make logs
     ```
 
-    Ngrok will give you a public HTTPS URL (e.g., `https://<random>.ngrok-free.app`).
+4.  **Expose your local server to the internet:**
 
-4.  **Configure your Telegram Bot:**
+    ```bash
+    make tunnel
+    ```
+
+    This uses localtunnel to expose port 80 to the internet. Check the tunnel status:
+
+    ```bash
+    make tunnel-status
+    ```
+
+    Localtunnel will give you a public HTTPS URL (e.g., `https://aert0.loca.lt`).
+
+5.  **Configure your Telegram Bot:**
 
     *   Talk to [@BotFather](https://t.me/BotFather) on Telegram.
-    *   Use the `/setdomain` command to link your bot to the ngrok URL.
-    *   Create a menu button for your bot with the URL pointing to your web app (e.g., `https://<random>.ngrok-free.app/webapp/`).
+    *   Use the `/setdomain` command to link your bot to the tunnel URL.
+    *   Create a menu button for your bot with the URL pointing to your web app (e.g., `https://aert0.loca.lt/webapp/`).
+
+### Available Make Commands
+
+*   `make up` - Start all services
+*   `make down` - Stop all services
+*   `make build` - Rebuild all services
+*   `make logs` - Show logs from all services
+*   `make tunnel` - Start localtunnel to expose port 80
+*   `make tunnel-status` - Check tunnel status and get URL
+*   `make kill` - Stop tunnel and clean up
+*   `make clean` - Remove all containers and volumes
 
 ## API Endpoints
 

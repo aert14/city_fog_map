@@ -1,0 +1,188 @@
+services:
+  monolith:
+    build:
+      context: .
+      dockerfile: ./services/monolith/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - NO_AUTH_MODE=1
+      - REDIS_URL=redis://redis:6379/0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  geo-service:
+    build: ./services/geo-service
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - NO_AUTH_MODE=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  user-service:
+    build: ./services/user-service
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - NO_AUTH_MODE=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on:
+      db:
+        condition: service_healthy
+
+  visit-service:
+    build: ./services/visit-service
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - NO_AUTH_MODE=1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+
+  stats-worker:
+    build: ./services/stats-worker
+    command: python worker.py
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - monolith
+      - geo-service
+      - user-service
+      - visit-service
+
+  prometheus:
+    image: prom/prometheus:v2.48.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - visit-service
+      - geo-service
+      - user-service
+      - stats-worker
+      - rabbitmq
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+
+  loki:
+    image: grafana/loki:2.9.2
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:2.9.2
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/promtail-config.yml
+    depends_on:
+      - loki
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+    volumes:
+      - ./otel-collector-config.yml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:latest
+    user: root
+    ports:
+      - "3200:3200"  # Tempo
+    volumes:
+      - ./tempo.yml:/etc/tempo.yml
+      - tempo_data:/tmp/tempo
+    command: -config.file=/etc/tempo.yml
+
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=gis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d gis"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+      - "9419:15692"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  grafana_data:
+  loki_data:
+  tempo_data:

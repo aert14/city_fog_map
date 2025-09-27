@@ -4,7 +4,7 @@ import hmac
 import hashlib
 import urllib.parse
 import logging
-from logging.handlers import RotatingFileHandler
+import sys
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
@@ -17,37 +17,37 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 import h3
 from starlette.middleware.sessions import SessionMiddleware
+from pythonjsonlogger import jsonlogger
 
-from . import db as db_module
-from . import cache
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+import db as db_module
+import cache
 from redis.asyncio import Redis
+import tracing
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure JSON logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# File logging to project root
-try:
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    log_file_path = os.path.join(project_root, "server.log")
-    need_handler = True
-    for h in logging.getLogger().handlers:
-        if isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == os.path.abspath(log_file_path):
-            need_handler = False
-            break
-    if need_handler:
-        fh = RotatingFileHandler(log_file_path, maxBytes=1_000_000, backupCount=3)
-        fh.setLevel(logging.INFO)
-        fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        logging.getLogger().addHandler(fh)
-        logger.info(f"File logging enabled at {log_file_path}")
-except Exception as e:
-    logger.warning(f"Failed to set up file logging: {e}")
+# Remove any existing handlers
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
 
+# Create JSON formatter
+json_formatter = jsonlogger.JsonFormatter()
+
+# Create stream handler for stdout
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(json_formatter)
+
+# Add handler to logger
+logger.addHandler(stream_handler)
+
+# Setup OpenTelemetry tracing
+tracing.setup_tracing("monolith")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_BOT_TOKEN:
@@ -427,8 +427,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
+# Add Prometheus metrics
+from prometheus_fastapi_instrumentator import Instrumentator
+instrumentator = Instrumentator()
+instrumentator.instrument(app)
+instrumentator.expose(app)
+
 # Static frontend at /webapp
-webapp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp")
+webapp_dir = "/webapp"
 if not os.path.isdir(webapp_dir):
     os.makedirs(webapp_dir, exist_ok=True)
 class LongCacheStatic(StaticFiles):
@@ -630,7 +636,14 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         logger.error(f"Invalid bbox format: {bbox}, error: {e}")
         raise HTTPException(status_code=400, detail="bad bbox")
 
+    logger.info(f"Parsed bbox: min_lon={min_lon}, min_lat={min_lat}, max_lon={max_lon}, max_lat={max_lat}")
+
     conn = db_module.get_connection()
+
+    # Debug: get all user hexagons first
+    all_user_hexagons = db_module.select_user_hexes(conn, user_id)
+    logger.info(f"User {user_id} has {len(all_user_hexagons)} total hexagons")
+
     hexagons = db_module.select_user_hexes_in_bbox(
         conn,
         user_id=user_id,
@@ -640,7 +653,9 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         max_lon=max_lon,
     )
 
-    logger.info(f"Circles response: {len(hexagons)} hexagons returned")
+    logger.info(f"Circles response: {len(hexagons)} hexagons returned in bbox")
+    if len(hexagons) > 0:
+        logger.info(f"Sample hexagons: {hexagons[:3]}")
     return CirclesResponse(hexagons=hexagons)
 
 

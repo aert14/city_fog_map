@@ -2,6 +2,7 @@ import os
 import psycopg2
 import psycopg2.extras
 import time
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import h3
@@ -329,6 +330,53 @@ def select_district_parent(conn: psycopg2.extensions.connection, district_id: in
             return None
         parent = row[0]
         return int(parent) if parent is not None else None
+
+
+def update_visit_statistics(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    district_id: int,
+    coverage: float,
+    okrug_id: Optional[int],
+) -> bool:
+    """
+    Update visit statistics for an existing atomic visit.
+    Assumes the atomic visit is already recorded.
+    Returns True if statistics were successfully updated.
+    """
+    try:
+        with conn.cursor() as cur:
+            increment_cell = 1 if coverage >= PRIMARY_COVERAGE_THRESHOLD else 0
+
+            _update_statistic(
+                cur,
+                table="user_district_stats",
+                key_field="district_id",
+                user_id=user_id,
+                region_id=district_id,
+                increment_cell=increment_cell,
+                coverage=coverage,
+            )
+
+            if okrug_id is not None:
+                _update_statistic(
+                    cur,
+                    table="user_okrug_stats",
+                    key_field="okrug_id",
+                    user_id=user_id,
+                    region_id=okrug_id,
+                    increment_cell=increment_cell,
+                    coverage=coverage,
+                )
+
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to update visit statistics: {e}")
+        return False
 
 
 def record_visit_and_increment_stats(

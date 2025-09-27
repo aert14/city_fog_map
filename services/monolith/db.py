@@ -154,24 +154,37 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
 
 
 def ensure_user(conn: psycopg2.extensions.connection, tg_id: int, username: Optional[str]) -> int:
-    with conn.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
-        row = cur.fetchone()
-        if row:
-            user_id = int(row[0])
-            if username:
-                cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
-                conn.commit()
-            return user_id
+    """Ensure user exists, with retry logic for deadlock handling."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
+                row = cur.fetchone()
+                if row:
+                    user_id = int(row[0])
+                    if username:
+                        cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
+                        conn.commit()
+                    return user_id
 
-        cur.execute(
-            "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
-            (tg_id, username),
-        )
-        user_id = cur.fetchone()[0]
-        cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
-        conn.commit()
-        return user_id
+                cur.execute(
+                    "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
+                    (tg_id, username),
+                )
+                user_id = cur.fetchone()[0]
+                cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+                conn.commit()
+                return user_id
+        except psycopg2.errors.DeadlockDetected:
+            if attempt < max_retries - 1:
+                # Wait a bit and retry
+                import time
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                # Re-raise the exception if all retries failed
+                raise
 
 
 def insert_circle_if_new(

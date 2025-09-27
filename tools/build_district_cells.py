@@ -36,7 +36,7 @@ from shapely.ops import transform
 
 LOG = logging.getLogger("build_district_cells")
 
-BASE_RESOLUTION = 9
+BASE_RESOLUTION = 10
 MIN_PRIMARY_COVERAGE = 0.5
 AREA_PROJECTION = "EPSG:32637"  # UTM zone 37N, covering Moscow region
 
