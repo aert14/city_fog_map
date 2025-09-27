@@ -607,6 +607,39 @@ def select_user_hexes_in_bbox(
     return hexagons
 
 
+# TODO: Consider implementing aggregate_hexagons for future optimization
+# def aggregate_hexagons(all_user_hexes: List[str]) -> List[str]:
+#     """Aggregate hexagons to parent indices for network optimization.
+#
+#     Groups child hexagons into parent hexagons if all children of a parent are present.
+#     Returns a mixed set of hexagons at different resolutions.
+#     """
+#     if not all_user_hexes:
+#         return []
+#
+#     resolution_to_group_at = BASE_VISIT_RESOLUTION - 2
+#     parents = {}
+#
+#     for hex_id in all_user_hexes:
+#         parent = h3.cell_to_parent(hex_id, resolution_to_group_at)
+#         if parent not in parents:
+#             parents[parent] = set()
+#         parents[parent].add(hex_id)
+#
+#     final_hexes = set()
+#     for parent, children in parents.items():
+#         # Check if all children of this parent are present
+#         expected_children_count = h3.cell_to_children_size(parent, BASE_VISIT_RESOLUTION)
+#         if len(children) == expected_children_count:
+#             # All children are present, add parent instead
+#             final_hexes.add(parent)
+#         else:
+#             # Not all children, add them individually
+#             final_hexes.update(children)
+#
+#     return list(final_hexes)
+
+
 def delete_visit_by_hex(
     conn: psycopg2.extensions.connection,
     *,
@@ -908,6 +941,87 @@ def fetch_leaderboard(
         params = [PRIMARY_COVERAGE_THRESHOLD, since_ts, level, limit]
         cur.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_all_districts_with_user_progress(
+    conn: psycopg2.extensions.connection, user_id: int
+) -> List[Dict[str, Any]]:
+    """Fetch all districts and okrugs with user progress statistics."""
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # First, handle districts (level = 'district')
+        district_sql = """
+            SELECT
+                d.id,
+                d.level,
+                d.name_ru,
+                d.parent_id,
+                ST_AsGeoJSON(d.geom) as geom_geojson,
+                d.bbox_min_lon,
+                d.bbox_min_lat,
+                d.bbox_max_lon,
+                d.bbox_max_lat,
+                d.total_cells,
+                d.total_weight,
+                COALESCE(s.visited_cells, 0) AS user_visited_cells,
+                COALESCE(s.visited_weight, 0.0) AS user_visited_weight
+            FROM districts AS d
+            LEFT JOIN user_district_stats AS s ON s.district_id = d.id AND s.user_id = %s
+            WHERE d.level = 'district'
+            ORDER BY d.name_ru
+        """
+
+        # Handle okrugs (level = 'okrug') with aggregated stats from child districts
+        okrug_sql = """
+            SELECT
+                d.id,
+                d.level,
+                d.name_ru,
+                d.parent_id,
+                ST_AsGeoJSON(d.geom) as geom_geojson,
+                d.bbox_min_lon,
+                d.bbox_min_lat,
+                d.bbox_max_lon,
+                d.bbox_max_lat,
+                COALESCE(child_totals.total_cells, d.total_cells, 0) AS total_cells,
+                COALESCE(child_totals.total_weight, d.total_weight, 0.0) AS total_weight,
+                COALESCE(s.visited_cells, 0) AS user_visited_cells,
+                COALESCE(s.visited_weight, 0.0) AS user_visited_weight
+            FROM districts AS d
+            LEFT JOIN (
+                SELECT parent_id AS okrug_id,
+                       SUM(total_cells) AS total_cells,
+                       SUM(total_weight) AS total_weight
+                FROM districts
+                WHERE level = 'district'
+                GROUP BY parent_id
+            ) AS child_totals ON child_totals.okrug_id = d.id
+            LEFT JOIN (
+                SELECT
+                    child.parent_id AS okrug_id,
+                    COALESCE(SUM(uds.visited_cells), 0) AS visited_cells,
+                    COALESCE(SUM(uds.visited_weight), 0.0) AS visited_weight
+                FROM districts AS child
+                LEFT JOIN user_district_stats AS uds
+                    ON uds.district_id = child.id AND uds.user_id = %s
+                WHERE child.level = 'district' AND child.parent_id IS NOT NULL
+                GROUP BY child.parent_id
+            ) AS s ON s.okrug_id = d.id
+            WHERE d.level = 'okrug'
+            ORDER BY d.name_ru
+        """
+
+        # Execute both queries and combine results
+        results = []
+
+        # Districts
+        cur.execute(district_sql, (user_id,))
+        results.extend([dict(row) for row in cur.fetchall()])
+
+        # Okrugs
+        cur.execute(okrug_sql, (user_id,))
+        results.extend([dict(row) for row in cur.fetchall()])
+
+        return results
 
 
 def update_visit_statistics(

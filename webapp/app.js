@@ -1343,8 +1343,8 @@
       });
       if (!response.ok)
         throw new Error(`Network error: ${response.statusText}`);
-      const textData = await response.text();
-      const receivedHexagons = textData ? textData.split(' ') : [];
+      const jsonData = await response.json();
+      const receivedHexagons = jsonData.hexagons || [];
 
       // Expand aggregated hexagons back to base resolution
       const expandedHexagons = new Set();
