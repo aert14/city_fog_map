@@ -2,9 +2,12 @@ import os
 import psycopg2
 import psycopg2.extras
 import time
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import h3
+
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -905,3 +908,50 @@ def fetch_leaderboard(
         params = [PRIMARY_COVERAGE_THRESHOLD, since_ts, level, limit]
         cur.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
+
+
+def update_visit_statistics(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    district_id: int,
+    coverage: float,
+    okrug_id: Optional[int],
+) -> bool:
+    """
+    Update visit statistics for an existing atomic visit.
+    Assumes the atomic visit is already recorded.
+    Returns True if statistics were successfully updated.
+    """
+    try:
+        with conn.cursor() as cur:
+            increment_cell = 1 if coverage >= PRIMARY_COVERAGE_THRESHOLD else 0
+
+            _update_statistic(
+                cur,
+                table="user_district_stats",
+                key_field="district_id",
+                user_id=user_id,
+                region_id=district_id,
+                increment_cell=increment_cell,
+                coverage=coverage,
+            )
+
+            if okrug_id is not None:
+                _update_statistic(
+                    cur,
+                    table="user_okrug_stats",
+                    key_field="okrug_id",
+                    user_id=user_id,
+                    region_id=okrug_id,
+                    increment_cell=increment_cell,
+                    coverage=coverage,
+                )
+
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to update visit statistics: {e}")
+        return False
