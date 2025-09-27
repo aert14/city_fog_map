@@ -115,3 +115,9 @@ class DeleteCircleRequest(BaseModel):
 
 class AuthRequest(BaseModel):
     initData: str
+
+
+class UserInfo(BaseModel):
+    id: int
+    tg_id: int
+    username: Optional[str]

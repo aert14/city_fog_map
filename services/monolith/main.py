@@ -597,6 +597,29 @@ async def debug_me(request: Request):
     return {"ok": True, "user": request.session.get("tg_user")}
 
 
+@app.get("/api/user/{user_id}", response_model=models.UserInfo)
+async def get_user(user_id: int):
+    """Get user information by internal user ID"""
+    conn = db_module.get_connection()
+    user_data = db_module.get_user_by_id(conn, user_id)
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    tg_id, username = user_data
+    return models.UserInfo(id=user_id, tg_id=tg_id, username=username)
+
+
+@app.post("/api/authenticate")
+async def authenticate(user=Depends(get_current_user)) -> Dict[str, Any]:
+    """Authenticate user and return user info with JWT-like token (simplified)"""
+    user_id, username = user
+    return {
+        "user_id": user_id,
+        "username": username,
+        "authenticated": True
+    }
+
+
 @app.get("/api/ping")
 async def ping():
     return {"ok": True}

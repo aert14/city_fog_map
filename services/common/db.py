@@ -190,6 +190,15 @@ def ensure_user(conn: psycopg2.extensions.connection, tg_id: int, username: Opti
                 raise
 
 
+def get_user_by_id(conn: psycopg2.extensions.connection, user_id: int) -> Optional[Tuple[int, Optional[str]]]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT tg_id, username FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if row:
+            return int(row[0]), row[1]
+        return None
+
+
 def insert_circle_if_new(
     conn: psycopg2.extensions.connection,
     *,
