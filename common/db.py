@@ -2,9 +2,12 @@ import os
 import psycopg2
 import psycopg2.extras
 import time
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import h3
+
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -146,32 +149,104 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS achievements (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL, -- Уникальный код, например 'FIRST_STEP'
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                icon TEXT -- Путь к иконке или ее код
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_achievements (
+                user_id INTEGER NOT NULL,
+                achievement_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, achievement_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (achievement_id) REFERENCES achievements(id)
+            );
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_h3 ON user_visits_atomic(h3);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_user ON user_visits_atomic(user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_district_stats_user ON user_district_stats(user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_okrug_stats_user ON user_okrug_stats(user_id);")
+
+        # Add geom column to user_visits_atomic table if it doesn't exist
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_name = 'user_visits_atomic'
+                               AND column_name = 'geom') THEN
+                    ALTER TABLE user_visits_atomic ADD COLUMN geom GEOMETRY(Point, 4326);
+                END IF;
+            END $$;
+        """)
+
+        # Create spatial index on the geom column
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_geom ON user_visits_atomic USING GIST(geom);")
+
+        # Insert basic achievements
+        cur.execute(
+            """
+            INSERT INTO achievements (code, name, description, icon) VALUES
+            ('FIRST_STEP', 'Первый шаг', 'Исследовать свою первую территорию.', 'footprints'),
+            ('EXPLORER_100', 'Исследователь', 'Исследовать 100 территорий.', 'compass'),
+            ('CARTOGRAPHER_1000', 'Картограф', 'Исследовать 1000 территорий.', 'map')
+            ON CONFLICT (code) DO NOTHING;
+            """
+        )
+
     conn.commit()
 
 
 def ensure_user(conn: psycopg2.extensions.connection, tg_id: int, username: Optional[str]) -> int:
+    """Ensure user exists, with retry logic for deadlock handling."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
+                row = cur.fetchone()
+                if row:
+                    user_id = int(row[0])
+                    if username:
+                        cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
+                        conn.commit()
+                    return user_id
+
+                cur.execute(
+                    "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
+                    (tg_id, username),
+                )
+                user_id = cur.fetchone()[0]
+                cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+                conn.commit()
+                return user_id
+        except psycopg2.errors.DeadlockDetected:
+            if attempt < max_retries - 1:
+                # Wait a bit and retry
+                import time
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                # Re-raise the exception if all retries failed
+                raise
+
+
+def get_user_by_id(conn: psycopg2.extensions.connection, user_id: int) -> Optional[Tuple[int, Optional[str]]]:
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
+        cur.execute("SELECT tg_id, username FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
         if row:
-            user_id = int(row[0])
-            if username:
-                cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
-                conn.commit()
-            return user_id
-
-        cur.execute(
-            "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
-            (tg_id, username),
-        )
-        user_id = cur.fetchone()[0]
-        cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
-        conn.commit()
-        return user_id
+            return int(row[0]), row[1]
+        return None
 
 
 def insert_circle_if_new(
@@ -331,6 +406,37 @@ def select_district_parent(conn: psycopg2.extensions.connection, district_id: in
         return int(parent) if parent is not None else None
 
 
+def record_atomic_visit(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    now_ts: Optional[int] = None,
+) -> bool:
+    """
+    Record only the atomic visit without updating statistics.
+    This is the fast path for visit recording.
+    """
+    ts = int(now_ts if now_ts is not None else time.time())
+    lat, lon = h3.cell_to_latlng(h3_index)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_visits_atomic(user_id, h3, ts, geom)
+            VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            ON CONFLICT DO NOTHING
+            """,
+            (user_id, h3_index, ts, lon, lat),
+        )
+        added = cur.rowcount > 0
+        if not added:
+            conn.rollback()
+            return False
+
+    conn.commit()
+    return True
+
+
 def record_visit_and_increment_stats(
     conn: psycopg2.extensions.connection,
     *,
@@ -342,13 +448,15 @@ def record_visit_and_increment_stats(
     now_ts: Optional[int] = None,
 ) -> bool:
     ts = int(now_ts if now_ts is not None else time.time())
+    lat, lon = h3.cell_to_latlng(h3_index)
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO user_visits_atomic(user_id, h3, ts)
-            VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+            INSERT INTO user_visits_atomic(user_id, h3, ts, geom)
+            VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            ON CONFLICT DO NOTHING
             """,
-            (user_id, h3_index, ts),
+            (user_id, h3_index, ts, lon, lat),
         )
         added = cur.rowcount > 0
         if not added:
@@ -581,14 +689,51 @@ def select_user_hexes_in_bbox(
     max_lat: float,
     max_lon: float,
 ) -> List[str]:
-    # This function is inefficient and should be replaced with a spatial query if it were used.
-    # For now, keeping the logic but on Postgres.
-    hexagons: List[str] = []
-    for h3_index in select_user_hexes(conn, user_id):
-        lat, lon = h3.cell_to_latlng(h3_index)
-        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
-            hexagons.append(h3_index)
-    return hexagons
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT h3
+            FROM user_visits_atomic
+            WHERE user_id = %s
+              AND geom IS NOT NULL
+              AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+            """,
+            (user_id, min_lon, min_lat, max_lon, max_lat),
+        )
+        return [str(row[0]) for row in cur.fetchall()]
+
+
+# TODO: Consider implementing aggregate_hexagons for future optimization
+# def aggregate_hexagons(all_user_hexes: List[str]) -> List[str]:
+#     """Aggregate hexagons to parent indices for network optimization.
+#
+#     Groups child hexagons into parent hexagons if all children of a parent are present.
+#     Returns a mixed set of hexagons at different resolutions.
+#     """
+#     if not all_user_hexes:
+#         return []
+#
+#     resolution_to_group_at = BASE_VISIT_RESOLUTION - 2
+#     parents = {}
+#
+#     for hex_id in all_user_hexes:
+#         parent = h3.cell_to_parent(hex_id, resolution_to_group_at)
+#         if parent not in parents:
+#             parents[parent] = set()
+#         parents[parent].add(hex_id)
+#
+#     final_hexes = set()
+#     for parent, children in parents.items():
+#         # Check if all children of this parent are present
+#         expected_children_count = h3.cell_to_children_size(parent, BASE_VISIT_RESOLUTION)
+#         if len(children) == expected_children_count:
+#             # All children are present, add parent instead
+#             final_hexes.add(parent)
+#         else:
+#             # Not all children, add them individually
+#             final_hexes.update(children)
+#
+#     return list(final_hexes)
 
 
 def delete_visit_by_hex(
@@ -973,3 +1118,87 @@ def fetch_all_districts_with_user_progress(
         results.extend([dict(row) for row in cur.fetchall()])
 
         return results
+
+
+def update_visit_statistics(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    district_id: int,
+    coverage: float,
+    okrug_id: Optional[int],
+) -> bool:
+    """
+    Update visit statistics for an existing atomic visit.
+    Assumes the atomic visit is already recorded.
+    Returns True if statistics were successfully updated.
+    """
+    try:
+        with conn.cursor() as cur:
+            increment_cell = 1 if coverage >= PRIMARY_COVERAGE_THRESHOLD else 0
+
+            _update_statistic(
+                cur,
+                table="user_district_stats",
+                key_field="district_id",
+                user_id=user_id,
+                region_id=district_id,
+                increment_cell=increment_cell,
+                coverage=coverage,
+            )
+
+            if okrug_id is not None:
+                _update_statistic(
+                    cur,
+                    table="user_okrug_stats",
+                    key_field="okrug_id",
+                    user_id=user_id,
+                    region_id=okrug_id,
+                    increment_cell=increment_cell,
+                    coverage=coverage,
+                )
+
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to update visit statistics: {e}")
+        return False
+
+
+def check_and_grant_achievements(
+    conn: psycopg2.extensions.connection, user_id: int
+):
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # 1. Получаем общее количество визитов пользователя
+
+        cur.execute("SELECT COUNT(*) as visit_count FROM user_visits_atomic WHERE user_id = %s", (user_id,))
+        visit_count = cur.fetchone()['visit_count']
+
+        # 2. Получаем все существующие ачивки
+        cur.execute("SELECT id, code FROM achievements")
+        achievements = {row['code']: row['id'] for row in cur.fetchall()}
+
+        # 3. Определяем, какие ачивки нужно выдать
+        to_grant = []
+        if visit_count >= 1 and 'FIRST_STEP' in achievements:
+            to_grant.append(achievements['FIRST_STEP'])
+        if visit_count >= 100 and 'EXPLORER_100' in achievements:
+            to_grant.append(achievements['EXPLORER_100'])
+        if visit_count >= 1000 and 'CARTOGRAPHER_1000' in achievements:
+            to_grant.append(achievements['CARTOGRAPHER_1000'])
+
+        # 4. Вставляем новые ачивки, игнорируя существующие
+        if to_grant:
+            args_str = ','.join(
+                cur.mogrify("(%s,%s)", (user_id, ach_id)).decode('utf-8')
+                for ach_id in to_grant
+            )
+            cur.execute(
+                f"""
+                INSERT INTO user_achievements (user_id, achievement_id) VALUES {args_str}
+                ON CONFLICT (user_id, achievement_id) DO NOTHING
+                """
+            )
+    conn.commit()

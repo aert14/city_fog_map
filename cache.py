@@ -58,6 +58,7 @@ async def check_rate_limit(user_id: int, limit: int = 20) -> bool:
     Returns:
         True если лимит не превышен, False если превышен
     """
+    logger.debug(f"Checking rate limit for user {user_id}, redis_client: {redis_client}")
     if not redis_client:
         # Если Redis недоступен, разрешаем запрос
         logger.warning("Redis unavailable, allowing request without rate limiting")

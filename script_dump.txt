@@ -286,7 +286,7 @@ def clear_all(conn: psycopg2.extensions.connection) -> tuple[int, int]:
         cur.execute("SELECT COUNT(*) FROM users")
         count_users = int(cur.fetchone()[0])
 
-        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats RESTART IDENTITY")
+        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats, user_achievements RESTART IDENTITY")
         conn.commit()
         return count_circles, count_users
 
@@ -1104,6 +1104,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 import h3
+import psycopg2
+import psycopg2.extras
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as db_module
@@ -1516,6 +1518,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
+# Test endpoint to verify registration works
+@app.get("/api/v1/test-early")
+async def test_early():
+    return {"message": "early test works"}
+
 # Static frontend at /webapp
 webapp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp")
 if not os.path.isdir(webapp_dir):
@@ -1757,6 +1764,16 @@ async def delete_circle(body: DeleteCircleRequest, user=Depends(get_current_user
 # -------------------------
 # Debug auth endpoints
 # -------------------------
+
+class Achievement(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: str
+    icon: Optional[str]
+    unlocked: bool
+    created_at: Optional[datetime]
+
 
 class AuthRequest(BaseModel):
     initData: str
@@ -2239,6 +2256,32 @@ async def get_leaderboard(
     return response
 
 
+@app.get("/api/v1/test")
+async def test_endpoint():
+    return {"message": "test works"}
+
+@app.get("/api/v1/me/achievements", response_model=List[Achievement])
+async def get_my_achievements(user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                a.id, a.code, a.name, a.description, a.icon,
+                (ua.user_id IS NOT NULL) as unlocked,
+                ua.created_at
+            FROM achievements AS a
+            LEFT JOIN user_achievements AS ua
+                ON a.id = ua.achievement_id AND ua.user_id = %s
+            ORDER BY a.id;
+            """,
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+
 
 
 services/monolith/queue.py:
@@ -2630,8 +2673,10 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 import h3
+import psycopg2
+import psycopg2.extras
 from starlette.middleware.sessions import SessionMiddleware
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger.jsonlogger import JsonFormatter
 
 import sys
 import os
@@ -2653,7 +2698,7 @@ for handler in logger.handlers[:]:
     logger.removeHandler(handler)
 
 # Create JSON formatter
-json_formatter = jsonlogger.JsonFormatter()
+json_formatter = JsonFormatter()
 
 # Create stream handler for stdout
 stream_handler = logging.StreamHandler(sys.stdout)
@@ -3787,6 +3832,28 @@ async def get_leaderboard(
     return response
 
 
+@app.get("/api/v1/me/achievements", response_model=List[models.Achievement])
+async def get_my_achievements(user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                a.id, a.code, a.name, a.description, a.icon,
+                (ua.user_id IS NOT NULL) as unlocked,
+                ua.created_at
+            FROM achievements AS a
+            LEFT JOIN user_achievements AS ua
+                ON a.id = ua.achievement_id AND ua.user_id = %s
+            ORDER BY a.id;
+            """,
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+
 
 
 services/stats-worker/worker.py:
@@ -3932,6 +3999,15 @@ def process_visit_message(message: Dict[str, Any]) -> bool:
                     logger.info(f"Invalidated cache for user {user_id} stats summary")
             except Exception as e:
                 logger.warning(f"Failed to invalidate cache: {e}")
+
+            # Check and grant achievements
+            try:
+                logger.info(f"Checking achievements for user {user_id}")
+                db_module.check_and_grant_achievements(conn, user_id)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to check achievements for user {user_id}: {e}"
+                )
         else:
             logger.error(f"Failed to update statistics for user {user_id}")
             jobs_failed_total.inc()  # Increment failed jobs counter
@@ -4089,7 +4165,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Copy the dependencies file to the working directory
-COPY requirements.txt .
+COPY services/stats-worker/requirements.txt .
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
@@ -4098,7 +4174,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Define the command to run the application
-CMD ["python", "worker.py"]
+CMD ["python", "services/stats-worker/worker.py"]
 
 
 services/stats-worker/cache.py:
@@ -4345,6 +4421,29 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS achievements (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL, -- Уникальный код, например 'FIRST_STEP'
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                icon TEXT -- Путь к иконке или ее код
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_achievements (
+                user_id INTEGER NOT NULL,
+                achievement_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, achievement_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (achievement_id) REFERENCES achievements(id)
+            );
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_h3 ON user_visits_atomic(h3);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_user ON user_visits_atomic(user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_district_stats_user ON user_district_stats(user_id);")
@@ -4364,6 +4463,17 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
 
         # Create spatial index on the geom column
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_geom ON user_visits_atomic USING GIST(geom);")
+
+        # Insert basic achievements
+        cur.execute(
+            """
+            INSERT INTO achievements (code, name, description, icon) VALUES
+            ('FIRST_STEP', 'Первый шаг', 'Исследовать свою первую территорию.', 'footprints'),
+            ('EXPLORER_100', 'Исследователь', 'Исследовать 100 территорий.', 'compass'),
+            ('CARTOGRAPHER_1000', 'Картограф', 'Исследовать 1000 территорий.', 'map')
+            ON CONFLICT (code) DO NOTHING;
+            """
+        )
 
     conn.commit()
 
@@ -4522,7 +4632,7 @@ def clear_all(conn: psycopg2.extensions.connection) -> tuple[int, int]:
         cur.execute("SELECT COUNT(*) FROM users")
         count_users = int(cur.fetchone()[0])
 
-        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats RESTART IDENTITY")
+        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats, user_achievements RESTART IDENTITY")
         conn.commit()
         return count_circles, count_users
 
@@ -5328,6 +5438,44 @@ def update_visit_statistics(
         logger.error(f"Failed to update visit statistics: {e}")
         return False
 
+
+def check_and_grant_achievements(
+    conn: psycopg2.extensions.connection, user_id: int
+):
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # 1. Получаем общее количество визитов пользователя
+
+        cur.execute("SELECT COUNT(*) as visit_count FROM user_visits_atomic WHERE user_id = %s", (user_id,))
+        visit_count = cur.fetchone()['visit_count']
+
+        # 2. Получаем все существующие ачивки
+        cur.execute("SELECT id, code FROM achievements")
+        achievements = {row['code']: row['id'] for row in cur.fetchall()}
+
+        # 3. Определяем, какие ачивки нужно выдать
+        to_grant = []
+        if visit_count >= 1 and 'FIRST_STEP' in achievements:
+            to_grant.append(achievements['FIRST_STEP'])
+        if visit_count >= 100 and 'EXPLORER_100' in achievements:
+            to_grant.append(achievements['EXPLORER_100'])
+        if visit_count >= 1000 and 'CARTOGRAPHER_1000' in achievements:
+            to_grant.append(achievements['CARTOGRAPHER_1000'])
+
+        # 4. Вставляем новые ачивки, игнорируя существующие
+        if to_grant:
+            args_str = ','.join(
+                cur.mogrify("(%s,%s)", (user_id, ach_id)).decode('utf-8')
+                for ach_id in to_grant
+            )
+            cur.execute(
+                f"""
+                INSERT INTO user_achievements (user_id, achievement_id) VALUES {args_str}
+                ON CONFLICT (user_id, achievement_id) DO NOTHING
+                """
+            )
+    conn.commit()
+
+
 services/common/models.py:
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Literal, Optional
@@ -5452,6 +5600,16 @@ class UserInfo(BaseModel):
     id: int
     tg_id: int
     username: Optional[str]
+
+
+class Achievement(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: str
+    icon: Optional[str]
+    unlocked: bool
+    created_at: Optional[datetime]
 
 
 services/common/__init__.py:
@@ -6053,17 +6211,10 @@ webapp/index.html:
   <body>
     <div id="app">
       <div id="toolbar">
-        <h1>City Fog Map</h1>
-        <button id="openBtn" class="btn">Explore 50m Around</button>
-        <button id="leaderboardBtn" class="btn btn-secondary">
-          Leaderboard
-        </button>
-        <button id="toggleFogBtn" class="btn" style="display: none">
-          Hide Fog
-        </button>
-        <span id="status"></span>
-        <span class="count-label">Explored: <span id="count">0</span></span>
+        <!-- Пользовательские элементы удалены -->
         <div id="debugPanel" style="display: none">
+          <!-- Кнопка "Fog" перенесена сюда -->
+          <button id="toggleFogBtn" class="btn">Hide Fog</button>
           <button id="deleteModeBtn" class="btn">Delete: Off</button>
           <button id="selectionToggleBtn" class="btn">Select: On</button>
           <button id="revealDistrictBtn" class="btn">Reveal District</button>
@@ -6078,6 +6229,22 @@ webapp/index.html:
         <canvas id="fog-canvas"></canvas>
         <!-- REMOVED: <div id="label-overlay"></div> -->
         <div id="loader"><div class="spinner"></div></div>
+      </div>
+
+      <div id="hud">
+        <button id="hud-profile-btn" class="hud-btn">
+          <!-- Иконка профиля -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+        </button>
+        <button id="hud-explore-btn" class="hud-btn main-action" disabled>
+          <!-- SVG и span остаются без изменений -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0-10 10c0 4.42 3.58 8 8 8s8-3.58 8-8a10 10 0 0 0-10-10z"/><path d="M12 12l4-4"/></svg>
+          <span>Исследовать</span>
+        </button>
+        <button id="hud-leaderboard-btn" class="hud-btn">
+          <!-- SVG остается без изменений -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.5a3.5 3.5 0 0 0 4 0"/><path d="M8 22V7.5a2.5 2.5 0 0 1 2.5-2.5h3A2.5 2.5 0 0 1 16 7.5V22"/></svg>
+        </button>
       </div>
 
       <div id="leaderboard-overlay" class="leaderboard-overlay">
@@ -6131,6 +6298,33 @@ webapp/index.html:
           </div>
         </div>
       </div>
+
+      <div id="profile-overlay" class="profile-overlay" style="display: none;">
+        <div class="profile-panel">
+          <div class="profile-header">
+            <h2>Профиль и Достижения</h2>
+            <button id="profile-close-btn" class="btn btn-ghost">✕</button>
+          </div>
+          <div id="profile-content" class="profile-content">
+            <h3>Ваши достижения</h3>
+            <div id="achievements-list" class="achievements-list">
+              <!-- Сюда будут загружаться ачивки -->
+              <div class="loader-sm"></div> <!-- Спиннер загрузки -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="onboarding-overlay" class="onboarding-overlay" style="display: none;">
+        <div class="onboarding-modal">
+          <h3 id="onboarding-title"></h3>
+          <p id="onboarding-text"></p>
+          <div class="onboarding-actions">
+            <button id="onboarding-skip-btn">Пропустить</button>
+            <button id="onboarding-next-btn">Далее</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -6174,25 +6368,17 @@ body {
   height: 100%;
 }
 #toolbar {
-  padding: 10px 14px;
+  /* Упрощенный стиль для контейнера debug-панели */
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 10px;
   display: flex;
-  gap: 12px;
-  align-items: center;
-  background-color: var(--toolbar-bg);
-  border-bottom: 1px solid var(--border-color);
   z-index: 50;
-  flex-shrink: 0;
-  backdrop-filter: blur(8px);
+  pointer-events: none; /* Фон не кликабельный */
 }
 
-#toolbar h1 {
-  font-family: "Russo One", sans-serif;
-  font-size: 20px;
-  margin: 0;
-  color: var(--text-primary);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-  margin-right: auto;
-}
 
 #map-container {
   position: relative;
@@ -6258,20 +6444,6 @@ body {
   box-shadow: none;
 }
 
-#status {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.count-label {
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-#count {
-  font-weight: 700;
-  color: var(--primary-color);
-  margin-left: 4px;
-  font-size: 16px;
-}
 
 #loader {
   position: absolute;
@@ -6304,12 +6476,11 @@ body {
 }
 
 #debugPanel {
-  margin-left: auto;
+  margin-left: auto; /* Сдвигает панель вправо */
   display: flex;
   align-items: center;
   gap: 10px;
-  color: var(--text-secondary);
-  font-size: 13px;
+  pointer-events: auto; /* Кнопки кликабельные */
 }
 #deleteModeBtn {
   background-color: var(--danger-color);
@@ -6452,6 +6623,116 @@ body {
   color: var(--text-primary);
 }
 
+#hud {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background: linear-gradient(180deg, rgba(20, 20, 25, 0) 0%, rgba(20, 20, 25, 0.85) 30%);
+  z-index: 50;
+  pointer-events: none; /* Позволяет кликать "сквозь" фон */
+}
+.hud-btn, .hud-info {
+  pointer-events: auto; /* Возвращает кликабельность элементам */
+}
+.hud-btn {
+  background-color: rgba(40, 45, 60, 0.8);
+  border: 1px solid rgba(100, 116, 139, 0.4);
+  color: #e2e8f0;
+  border-radius: 50%;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(8px);
+}
+.hud-btn:hover {
+  background-color: rgba(55, 65, 81, 0.9);
+  border-color: rgba(148, 163, 184, 0.5);
+}
+.hud-btn.main-action {
+  width: auto;
+  height: 56px;
+  border-radius: 28px;
+  padding: 0 24px;
+  background-color: var(--primary-color);
+  border-color: transparent;
+  color: white;
+  font-weight: 700;
+  font-size: 16px;
+  gap: 8px;
+}
+.hud-btn.main-action:disabled {
+  background-color: #475569;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.hud-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(40, 45, 60, 0.8);
+  border-radius: 16px;
+  padding: 8px 16px;
+  border: 1px solid rgba(100, 116, 139, 0.4);
+  backdrop-filter: blur(8px);
+}
+.hud-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+.hud-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* Стили для оверлея и панели профиля (похожи на лидерборд для консистентности) */
+.profile-overlay {
+  position: fixed; inset: 0; background: rgba(10, 10, 16, 0.72);
+  backdrop-filter: blur(12px); display: none; align-items: center;
+  justify-content: center; z-index: 100;
+}
+.profile-panel {
+  width: min(500px, 92vw); max-height: 88vh; display: flex; flex-direction: column;
+  background: rgba(17, 24, 39, 0.92); border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+  padding: 20px; gap: 16px;
+}
+.profile-header { display: flex; align-items: center; justify-content: space-between; }
+.profile-header h2 { font-size: 20px; font-weight: 700; margin: 0; }
+.profile-content { overflow-y: auto; padding-right: 10px; }
+
+/* Стили для списка достижений */
+.achievements-list { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.achievement-item {
+  display: flex; align-items: center; gap: 16px;
+  background: rgba(30, 41, 59, 0.5); padding: 12px; border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  filter: grayscale(80%); opacity: 0.6; transition: all 0.2s ease;
+}
+.achievement-item.unlocked {
+  filter: grayscale(0%); opacity: 1;
+  border-color: rgba(14, 165, 233, 0.4);
+}
+.achievement-icon { width: 48px; height: 48px; flex-shrink: 0; } /* Тут будет иконка */
+.achievement-details h4 { margin: 0 0 4px; font-size: 16px; color: var(--text-primary); }
+.achievement-details p { margin: 0; font-size: 14px; color: var(--text-secondary); }
+.loader-sm { /* Маленький спиннер */
+  width: 24px; height: 24px; border: 3px solid rgba(14, 165, 233, 0.2);
+  border-top-color: var(--primary-color); border-radius: 50%;
+  animation: spin 1s linear infinite; margin: 20px auto;
+}
+
 @media (max-width: 600px) {
   .leaderboard-panel {
     width: 96vw;
@@ -6462,6 +6743,38 @@ body {
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+/* Onboarding modal styles */
+.onboarding-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 10, 16, 0.7);
+    backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+}
+.onboarding-modal {
+    background: #1f2937;
+    padding: 24px;
+    border-radius: 16px;
+    max-width: 320px;
+    text-align: center;
+    border: 1px solid #4b5563;
+}
+.onboarding-modal h3 {
+    margin-top: 0;
+}
+.onboarding-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 20px;
+}
+#onboarding-skip-btn {
+    background: #4b5563;
 }
 
 webapp/debug-auth.html:
@@ -6580,6 +6893,11 @@ webapp/app.js:
     } catch (_) {}
   }
 
+  // Check if onboarding has been completed
+  if (!localStorage.getItem('onboardingCompleted')) {
+    startOnboarding();
+  }
+
   async function getDebugSettings() {
     try {
       const response = await fetch("/api/v1/debug-mode");
@@ -6614,8 +6932,8 @@ webapp/app.js:
   }
 
   // --- UI & Config ---
-  const openBtn = document.getElementById("openBtn");
-  const leaderboardBtn = document.getElementById("leaderboardBtn");
+  const openBtn = document.getElementById("hud-explore-btn");
+  const leaderboardBtn = document.getElementById("hud-leaderboard-btn");
   const leaderboardOverlay = document.getElementById("leaderboard-overlay");
   const leaderboardCloseBtn = document.getElementById("leaderboardCloseBtn");
   const leaderboardLevelSelect = document.getElementById("leaderboardLevel");
@@ -6623,8 +6941,11 @@ webapp/app.js:
   const leaderboardStatus = document.getElementById("leaderboardStatus");
   const leaderboardBody = document.getElementById("leaderboardBody");
   const toggleFogBtn = document.getElementById("toggleFogBtn");
-  const countEl = document.getElementById("count");
-  const statusEl = document.getElementById("status");
+  const profileBtn = document.getElementById("hud-profile-btn");
+  const profileOverlay = document.getElementById("profile-overlay");
+  const profileCloseBtn = document.getElementById("profile-close-btn");
+  const achievementsList = document.getElementById("achievements-list");
+  const countEl = document.getElementById("hud-count");
   const fogCanvas = document.getElementById("fog-canvas");
   const fogCtx = fogCanvas.getContext("2d");
   const DPR = window.devicePixelRatio || 1;
@@ -6684,11 +7005,9 @@ webapp/app.js:
   let selectedDistrictFeature = null;
   let selectedDistrictAbortController = null;
   let selectedDistrictResView = null;
-  const DEFAULT_STATUS_TEXT = "Select a district";
   const districtFeatureMap = new Map();
   const okrugFeatureMap = new Map();
   const districtCellsCache = new Map();
-  let statusOverrideMessage = null;
 
   // --- NEW: Spatial Index for Hexagons ---
   const spatialIndex = new Map();
@@ -7385,10 +7704,7 @@ webapp/app.js:
           } else {
             clearDistrictSelection();
             updateDistrictHexLayer(emptyFeatureCollection);
-            if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
           }
-        } else if (!statusOverrideMessage) {
-          setStatus(DEFAULT_STATUS_TEXT);
         }
       })
       .catch((error) => {
@@ -7493,10 +7809,7 @@ webapp/app.js:
           } else {
             clearDistrictSelection();
             updateDistrictHexLayer(emptyFeatureCollection);
-            if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
           }
-        } else if (!statusOverrideMessage) {
-          setStatus(DEFAULT_STATUS_TEXT);
         }
       })
       .catch((error) => {
@@ -7534,14 +7847,12 @@ webapp/app.js:
 
   function updateStatusForSelection() {
     if (!selectedDistrictId || !selectedDistrictFeature) {
-      if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
       return;
     }
     const suffix = formatProgressSuffix(selectedDistrictFeature);
     const label = suffix
       ? `${selectedDistrictName} • ${suffix}`
       : selectedDistrictName;
-    setStatus(label || DEFAULT_STATUS_TEXT);
   }
 
   function handleDistrictSelection(feature) {
@@ -7636,7 +7947,6 @@ webapp/app.js:
     if (selectedDistrictAbortController) {
       selectedDistrictAbortController.abort();
     }
-    setStatus(`Loading ${selectedDistrictName}…`, { temporary: true });
     const controller = new AbortController();
     selectedDistrictAbortController = controller;
 
@@ -7668,12 +7978,6 @@ webapp/app.js:
       .catch((error) => {
         if (controller.signal.aborted) return;
         console.warn("[district] Failed to fetch district cells", error);
-        if (selectedDistrictId === districtId) {
-          setStatus("Failed to load district cells", {
-            temporary: true,
-            state: "error",
-          });
-        }
       })
       .finally(() => {
         if (selectedDistrictAbortController === controller) {
@@ -7756,14 +8060,6 @@ webapp/app.js:
     return { payload, resValue, cacheKey, featureCollection };
   }
 
-  function setStatus(message, opts = {}) {
-    statusOverrideMessage = opts.temporary ? message : null;
-    if (!statusEl) return;
-    statusEl.textContent = message || DEFAULT_STATUS_TEXT;
-    statusEl.dataset.state = opts.state || "";
-  }
-
-  setStatus(DEFAULT_STATUS_TEXT);
 
   if (noAuthMode || debugAuthMode) {
     toggleFogBtn.style.display = "inline-block";
@@ -8082,22 +8378,22 @@ webapp/app.js:
   let lastKnownPosition = null;
   const TARGET_GEO_ZOOM = 17;
   openBtn.disabled = true;
-  openBtn.textContent = "Locating...";
+  openBtn.querySelector('span').textContent = "Поиск...";
 
   geolocate.on("geolocate", (pos) => {
     lastKnownPosition = pos.coords;
     const zoom = Math.max(map.getZoom(), TARGET_GEO_ZOOM);
     map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom });
     openBtn.disabled = false;
-    openBtn.textContent = "Explore 50m Around";
+    openBtn.querySelector('span').textContent = "Исследовать";
   });
 
   geolocate.on("error", () => {
     if (noAuthMode) {
-      openBtn.textContent = "Click map to add points";
+      openBtn.querySelector('span').textContent = "Кликните по карте для добавления точек";
       openBtn.disabled = false;
     } else {
-      openBtn.textContent = "Geolocation failed";
+      openBtn.querySelector('span').textContent = "Ошибка геолокации";
     }
   });
 
@@ -8238,6 +8534,27 @@ webapp/app.js:
 
   document.addEventListener("keydown", handleLeaderboardKey);
 
+  if (profileBtn) {
+    profileBtn.addEventListener('click', () => {
+      profileOverlay.style.display = 'flex';
+      fetchAndRenderAchievements(); // Загружаем данные при открытии
+    });
+  }
+
+  if (profileCloseBtn) {
+    profileCloseBtn.addEventListener('click', () => {
+      profileOverlay.style.display = 'none';
+    });
+  }
+
+  if (profileOverlay) {
+    profileOverlay.addEventListener('click', (event) => {
+      if (event.target === profileOverlay) { // Закрытие по клику на фон
+        profileOverlay.style.display = 'none';
+      }
+    });
+  }
+
   if (revealDistrictBtn) {
     revealDistrictBtn.addEventListener("click", async () => {
       if (!selectedDistrictId) {
@@ -8312,6 +8629,100 @@ webapp/app.js:
       deleteHexAtPoint(e.point);
     }
   });
+
+  async function fetchAndRenderAchievements() {
+    if (!achievementsList) return;
+    achievementsList.innerHTML = '<div class="loader-sm"></div>'; // Показываем загрузчик
+
+    try {
+      const response = await fetch('/api/v1/me/achievements', { headers: getAuthHeaders() });
+      if (!response.ok) throw new Error('Failed to load achievements');
+
+      const achievements = await response.json();
+      achievementsList.innerHTML = ''; // Очищаем
+
+      if (achievements.length === 0) {
+        achievementsList.textContent = 'Достижений пока нет.';
+        return;
+      }
+
+      achievements.forEach(ach => {
+        const item = document.createElement('div');
+        item.className = 'achievement-item';
+        if (ach.unlocked) {
+          item.classList.add('unlocked');
+        }
+
+        // TODO: Иконки можно будет добавить позже, пока плейсхолдер
+        item.innerHTML = `
+          <div class="achievement-icon" style="background: #334155;"></div>
+          <div class="achievement-details">
+            <h4>${ach.name}</h4>
+            <p>${ach.description}</p>
+          </div>
+        `;
+        achievementsList.appendChild(item);
+      });
+
+    } catch (error) {
+      console.error('Achievement fetch error:', error);
+      achievementsList.innerHTML = '<p style="color: #f87171;">Не удалось загрузить достижения.</p>';
+    }
+  }
+
+  function startOnboarding() {
+    const steps = [
+      {
+        title: "Добро пожаловать!",
+        text: "Это City Fog Map, игра, где вы исследуете реальный мир и открываете его на карте, рассеивая 'туман войны'."
+      },
+      {
+        title: "Как исследовать?",
+        text: "Перемещайтесь по городу, и когда будете готовы, нажмите большую кнопку 'Исследовать' внизу, чтобы открыть территорию вокруг вас."
+      },
+      {
+        title: "Следите за прогрессом",
+        text: "Кликайте на районы на карте, чтобы увидеть свой прогресс и соревнуйтесь с другими игроками в таблице лидеров. Удачи!"
+      }
+    ];
+
+    let currentStep = 0;
+    const overlay = document.getElementById('onboarding-overlay');
+    const titleEl = document.getElementById('onboarding-title');
+    const textEl = document.getElementById('onboarding-text');
+    const skipBtn = document.getElementById('onboarding-skip-btn');
+    const nextBtn = document.getElementById('onboarding-next-btn');
+
+    function showStep(stepIndex) {
+      const step = steps[stepIndex];
+      titleEl.textContent = step.title;
+      textEl.textContent = step.text;
+      if (stepIndex === steps.length - 1) {
+        nextBtn.textContent = "Начать игру!";
+      } else {
+        nextBtn.textContent = "Далее";
+      }
+      overlay.style.display = 'flex';
+    }
+
+    function finishOnboarding() {
+      overlay.style.display = 'none';
+      localStorage.setItem('onboardingCompleted', 'true');
+    }
+
+    nextBtn.addEventListener('click', () => {
+      currentStep++;
+      if (currentStep < steps.length) {
+        showStep(currentStep);
+      } else {
+        finishOnboarding();
+      }
+    });
+
+    skipBtn.addEventListener('click', finishOnboarding);
+
+    showStep(0);
+  }
 })();
 
 webapp/texture.worker.js:

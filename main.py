@@ -4,53 +4,54 @@ import hmac
 import hashlib
 import urllib.parse
 import logging
-from logging.handlers import RotatingFileHandler
+import sys
 import time
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 import h3
 import psycopg2
 import psycopg2.extras
 from starlette.middleware.sessions import SessionMiddleware
+from pythonjsonlogger.jsonlogger import JsonFormatter
 
-from . import db as db_module
-from . import cache
-from .cache import check_rate_limit, increment_rate_limit
+import sys
+import os
+# common is now in the same directory, no need to modify path
+from common import db as db_module
+from common import models
+import cache
 from redis.asyncio import Redis
+import tracing
+import rabbitmq_queue as queue
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure JSON logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# File logging to project root
-try:
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    log_file_path = os.path.join(project_root, "server.log")
-    need_handler = True
-    for h in logging.getLogger().handlers:
-        if isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == os.path.abspath(log_file_path):
-            need_handler = False
-            break
-    if need_handler:
-        fh = RotatingFileHandler(log_file_path, maxBytes=1_000_000, backupCount=3)
-        fh.setLevel(logging.INFO)
-        fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        logging.getLogger().addHandler(fh)
-        logger.info(f"File logging enabled at {log_file_path}")
-except Exception as e:
-    logger.warning(f"Failed to set up file logging: {e}")
+# Remove any existing handlers
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
 
+# Create JSON formatter
+json_formatter = JsonFormatter()
+
+# Create stream handler for stdout
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(json_formatter)
+
+# Add handler to logger
+logger.addHandler(stream_handler)
+
+# Setup OpenTelemetry tracing
+tracing.setup_tracing("monolith")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_BOT_TOKEN:
@@ -61,6 +62,39 @@ if not TELEGRAM_BOT_TOKEN:
 DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "0") == "1"
 # No-auth local mode: bypass Telegram auth and use a fixed local user
 NO_AUTH_MODE = os.getenv("NO_AUTH_MODE", "0") == "1"
+
+
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Вычисляет расстояние между двумя точками на Земле в километрах.
+    Использует формулу Haversine.
+
+    Args:
+        lat1, lon1: Координаты первой точки
+        lat2, lon2: Координаты второй точки
+
+    Returns:
+        Расстояние в километрах
+    """
+    # Радиус Земли в километрах
+    R = 6371.0
+
+    # Преобразование в радианы
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+
+    # Разницы координат
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+
+    # Формула Haversine
+    a = math.sin(dlat / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    distance = R * c
+    return distance
 
 
 def verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 86400) -> Dict:
@@ -97,112 +131,6 @@ def verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 8640
     return {"ok": True, "payload": data}
 
 
-class VisitRequest(BaseModel):
-    lat: float = Field(..., ge=-90.0, le=90.0)
-    lon: float = Field(..., ge=-180.0, le=180.0)
-
-
-class Circle(BaseModel):
-    lat: float
-    lon: float
-
-
-class RegionStats(BaseModel):
-    id: int
-    visited_cells: int
-    visited_weight: float
-
-
-class VisitStats(BaseModel):
-    total_circles: int
-    district: Optional[RegionStats] = None
-    okrug: Optional[RegionStats] = None
-
-
-class VisitResponse(BaseModel):
-    added: int
-    circle: Circle
-    stats: VisitStats
-
-
-class CirclesResponse(BaseModel):
-    hexagons: List[str]
-
-
-class ProgressBreakdown(BaseModel):
-    visited_cells: int
-    total_cells: int
-    percent: float
-    percent_cells: float = 0.0
-    percent_weight: float = 0.0
-    visited_weight: float = 0.0
-    total_weight: float = 0.0
-
-
-class DistrictFeatureResponse(BaseModel):
-    id: int
-    name: str
-    level: Literal["okrug", "district"]
-    parent_id: Optional[int] = None
-    bbox: Optional[List[float]] = None
-    geom: Dict[str, Any]
-    progress: ProgressBreakdown
-
-
-class DistrictCellResponse(BaseModel):
-    h3: str
-    coverage: float
-    visited: bool
-    total_children: Optional[int] = None
-    visited_children: Optional[int] = None
-    visited_fraction: Optional[float] = None
-
-
-class DistrictCellsResponse(BaseModel):
-    district_id: int
-    resolution: int
-    base_resolution: int
-    cells: List[DistrictCellResponse]
-
-
-class OkrugSummaryEntry(BaseModel):
-    id: int
-    name: str
-    parent_id: Optional[int] = None
-    progress: ProgressBreakdown
-
-
-class DistrictSummaryEntry(BaseModel):
-    id: int
-    name: str
-    parent_id: Optional[int] = None
-    parent_name: Optional[str] = None
-    progress: ProgressBreakdown
-
-
-class StatsSummaryResponse(BaseModel):
-    total: ProgressBreakdown
-    okrugs: List[OkrugSummaryEntry]
-    bottom_districts: List[DistrictSummaryEntry]
-
-
-class LeaderboardEntry(BaseModel):
-    rank: int
-    user_id: int
-    username: Optional[str]
-    visited_cells: int
-    visited_weight: float
-    percent_cells: float
-    percent_weight: float
-
-
-class LeaderboardResponse(BaseModel):
-    level: Literal["district", "okrug"]
-    period: Literal["week", "season"]
-    generated_at: datetime
-    entries: List[LeaderboardEntry]
-
-
 def _parse_bbox(bbox: str) -> Tuple[float, float, float, float]:
     try:
         min_lon_str, min_lat_str, max_lon_str, max_lat_str = bbox.split(",")
@@ -222,7 +150,7 @@ def _progress_from_counts(
     *,
     visited_weight: float = 0.0,
     total_weight: float = 0.0,
-) -> ProgressBreakdown:
+) -> models.ProgressBreakdown:
     percent_cells = 0.0
     percent_weight = 0.0
 
@@ -232,7 +160,7 @@ def _progress_from_counts(
     if total_weight > 0:
         percent_weight = round((visited_weight / total_weight) * 100.0, 2)
 
-    return ProgressBreakdown(
+    return models.ProgressBreakdown(
         visited_cells=int(visited_cells),
         total_cells=int(total_cells),
         percent=percent_cells,
@@ -263,16 +191,16 @@ def _build_cells_payload(
     visited: Set[str],
     base_resolution: int,
     target_resolution: int,
-) -> List[DistrictCellResponse]:
+) -> List[models.DistrictCellResponse]:
     if target_resolution >= base_resolution:
         target_resolution = base_resolution
 
     if target_resolution == base_resolution:
-        cells: List[DistrictCellResponse] = []
+        cells: List[models.DistrictCellResponse] = []
         for h3_index, coverage in base_cells:
             is_visited = h3_index in visited
             cells.append(
-                DistrictCellResponse(
+                models.DistrictCellResponse(
                     h3=h3_index,
                     coverage=round(float(coverage), 6),
                     visited=is_visited,
@@ -305,14 +233,14 @@ def _build_cells_payload(
         if h3_index in visited:
             bucket["visited_children"] += 1
 
-    cells: List[DistrictCellResponse] = []
+    cells: List[models.DistrictCellResponse] = []
     for parent_h3, bucket in aggregated.items():
         total_children = bucket["total_children"] or 1
         visited_children = bucket["visited_children"]
         coverage_avg = bucket["coverage_sum"] / total_children
         visited_fraction = visited_children / total_children
         cells.append(
-            DistrictCellResponse(
+            models.DistrictCellResponse(
                 h3=parent_h3,
                 coverage=round(min(1.0, coverage_avg), 6),
                 visited=visited_children > 0,
@@ -411,8 +339,17 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 City Fog Map API starting up...")
 
+    # Check for production environment with debug flags
+    app_env = os.getenv("APP_ENV", "").lower()
+    if app_env == "production" and (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        logger.error("FATAL: Cannot start in production environment with debug flags enabled")
+        raise RuntimeError("Cannot start in production environment with DEBUG_AUTH_MODE or NO_AUTH_MODE enabled")
+
     # Initialize Redis
     await cache.init_redis_pool()
+
+    # Initialize RabbitMQ
+    await queue.init_rabbitmq_connection()
 
     # Initialize database
     logger.info("Database initialization...")
@@ -428,15 +365,19 @@ async def lifespan(app: FastAPI):
     # Close Redis connection
     await cache.close_redis_pool()
 
+    # Close RabbitMQ connection
+    await queue.close_rabbitmq_connection()
+
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
-# Test endpoint to verify registration works
-@app.get("/api/v1/test-early")
-async def test_early():
-    return {"message": "early test works"}
+# Add Prometheus metrics
+from prometheus_fastapi_instrumentator import Instrumentator
+instrumentator = Instrumentator()
+instrumentator.instrument(app)
+instrumentator.expose(app)
 
 # Static frontend at /webapp
-webapp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp")
+webapp_dir = "/webapp"
 if not os.path.isdir(webapp_dir):
     os.makedirs(webapp_dir, exist_ok=True)
 class LongCacheStatic(StaticFiles):
@@ -540,9 +481,9 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/v1/visit", response_model=VisitResponse)
+@app.post("/api/v1/visit", response_model=models.VisitResponse)
 async def visit_area(
-    body: VisitRequest,
+    body: models.VisitRequest,
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
@@ -550,14 +491,41 @@ async def visit_area(
     user_id, _ = user
     logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
 
-    # Проверяем rate limit только если не в debug режиме
-    if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
-        if not await check_rate_limit(user_id, limit=20):
-            logger.warning(f"Rate limit exceeded for user {user_id}")
-            raise HTTPException(status_code=429, detail="Too Many Requests")
+    # Проверка скорости и телепортов
+    if redis_client:
+        try:
+            last_visit_key = f"user:{user_id}:last_visit"
+            last_visit_data = await redis_client.get(last_visit_key)
 
-        # Увеличиваем счетчик запросов
-        await increment_rate_limit(user_id, window_seconds=60)
+            if last_visit_data:
+                # Парсим данные последнего визита: timestamp,lat,lon
+                last_visit_str = last_visit_data.decode('utf-8')
+                last_timestamp_str, last_lat_str, last_lon_str = last_visit_str.split(',')
+                last_timestamp = float(last_timestamp_str)
+                last_lat = float(last_lat_str)
+                last_lon = float(last_lon_str)
+
+                current_timestamp = time.time()
+                time_diff_seconds = current_timestamp - last_timestamp
+
+                if time_diff_seconds > 0:  # Избегаем деления на ноль
+                    distance_km = calculate_distance(last_lat, last_lon, body.lat, body.lon)
+                    speed_kmh = (distance_km / time_diff_seconds) * 3600  # км/ч
+
+                    logger.info(f"Speed check: distance={distance_km:.3f}km, time_diff={time_diff_seconds:.1f}s, speed={speed_kmh:.1f}km/h")
+
+                    # Проверка условий: (дистанция > 2 км и время < 10 сек) ИЛИ скорость > 150 км/ч
+                    if distance_km > 2.0 and time_diff_seconds < 10.0:
+                        logger.warning(f"Visit rejected: teleport detected (distance={distance_km:.3f}km in {time_diff_seconds:.1f}s) for user {user_id}")
+                        raise HTTPException(status_code=400, detail="Visit rejected: teleport detected")
+
+                    if speed_kmh > 150.0:
+                        logger.warning(f"Visit rejected: excessive speed {speed_kmh:.1f} km/h for user {user_id}")
+                        raise HTTPException(status_code=400, detail="Visit rejected: excessive speed detected")
+
+        except Exception as e:
+            logger.error(f"Error during speed check for user {user_id}: {e}")
+            # В случае ошибки проверки скорости разрешаем визит, но логируем ошибку
 
     conn = db_module.get_connection()
 
@@ -569,7 +537,7 @@ async def visit_area(
     if not district_row:
         logger.info(f"Visit ignored: no district for geokey={geokey}")
         stats_dict = db_module.fetch_user_stats(conn, user_id=user_id, district_id=None, okrug_id=None)
-        stats = VisitStats(
+        stats = models.VisitStats(
             total_circles=stats_dict["total_circles"],
             district=None,
             okrug=None,
@@ -584,34 +552,33 @@ async def visit_area(
             except Exception as e:
                 logger.warning(f"Error invalidating Redis cache: {e}")
 
-        return VisitResponse(
+        return models.VisitResponse(
             added=0,
-            circle=Circle(lat=lat, lon=lon),
+            circle=models.Circle(lat=lat, lon=lon),
             stats=stats,
         )
 
     district_id, coverage = district_row
     okrug_id = db_module.select_district_parent(conn, district_id)
 
-    added = db_module.record_visit_and_increment_stats(
+    # Быстрая запись только атомарного визита
+    added = db_module.record_atomic_visit(
         conn,
         user_id=user_id,
         h3_index=geokey,
-        district_id=district_id,
-        coverage=coverage,
-        okrug_id=okrug_id,
     )
 
+    # Получаем статистику (может быть с задержкой обновления)
     stats_dict = db_module.fetch_user_stats(
         conn,
         user_id=user_id,
         district_id=district_id,
         okrug_id=okrug_id,
     )
-    stats = VisitStats(
+    stats = models.VisitStats(
         total_circles=stats_dict["total_circles"],
-        district=RegionStats(**stats_dict["district"]) if stats_dict.get("district") else None,
-        okrug=RegionStats(**stats_dict["okrug"]) if stats_dict.get("okrug") else None,
+        district=models.RegionStats(**stats_dict["district"]) if stats_dict.get("district") else None,
+        okrug=models.RegionStats(**stats_dict["okrug"]) if stats_dict.get("okrug") else None,
     )
 
     # Инвалидируем кэш статистики пользователя
@@ -623,17 +590,43 @@ async def visit_area(
         except Exception as e:
             logger.warning(f"Error invalidating Redis cache: {e}")
 
+    # Отправляем сообщение в RabbitMQ о визите сразу после успешной записи
+    if added:  # Только если визит был добавлен (не повтор)
+        try:
+            current_timestamp = int(time.time())
+            await queue.publish_visit_message(
+                user_id=user_id,
+                h3_geokey=geokey,
+                lat=lat,
+                lon=lon,
+                timestamp=current_timestamp
+            )
+        except Exception as e:
+            logger.error(f"Error publishing visit message to RabbitMQ for user {user_id}: {e}")
+            # Не прерываем обработку визита из-за ошибки RabbitMQ
+
+    # Обновляем данные последнего визита в Redis
+    if redis_client:
+        try:
+            last_visit_key = f"user:{user_id}:last_visit"
+            current_timestamp = time.time()
+            visit_data = f"{current_timestamp},{lat},{lon}"
+            await redis_client.set(last_visit_key, visit_data)
+            logger.info(f"Updated last visit data for user {user_id}: {visit_data}")
+        except Exception as e:
+            logger.error(f"Error updating last visit data in Redis for user {user_id}: {e}")
+
     logger.info(
         f"Visit processed: added={added}, district_id={district_id}, okrug_id={okrug_id}, geokey={geokey}, coverage={coverage:.3f}"
     )
-    return VisitResponse(
+    return models.VisitResponse(
         added=1 if added else 0,
-        circle=Circle(lat=lat, lon=lon),
+        circle=models.Circle(lat=lat, lon=lon),
         stats=stats,
     )
 
 
-@app.get("/api/v1/circles", response_model=CirclesResponse)
+@app.get("/api/v1/circles", response_model=models.CirclesResponse)
 async def list_circles(bbox: str, user=Depends(get_current_user)):
     # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
@@ -647,7 +640,14 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         logger.error(f"Invalid bbox format: {bbox}, error: {e}")
         raise HTTPException(status_code=400, detail="bad bbox")
 
+    logger.info(f"Parsed bbox: min_lon={min_lon}, min_lat={min_lat}, max_lon={max_lon}, max_lat={max_lat}")
+
     conn = db_module.get_connection()
+
+    # Debug: get all user hexagons first
+    all_user_hexagons = db_module.select_user_hexes(conn, user_id)
+    logger.info(f"User {user_id} has {len(all_user_hexagons)} total hexagons")
+
     hexagons = db_module.select_user_hexes_in_bbox(
         conn,
         user_id=user_id,
@@ -657,16 +657,14 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         max_lon=max_lon,
     )
 
-    logger.info(f"Circles response: {len(hexagons)} hexagons returned")
-    return CirclesResponse(hexagons=hexagons)
-
-
-class DeleteCircleRequest(BaseModel):
-    geokey: str = Field(..., min_length=10, max_length=20)
+    logger.info(f"Circles response: {len(hexagons)} hexagons returned in bbox")
+    if len(hexagons) > 0:
+        logger.info(f"Sample hexagons: {hexagons[:3]}")
+    return models.CirclesResponse(hexagons=hexagons)
 
 
 @app.delete("/api/v1/circle")
-async def delete_circle(body: DeleteCircleRequest, user=Depends(get_current_user)):
+async def delete_circle(body: models.DeleteCircleRequest, user=Depends(get_current_user)):
     user_id, _ = user
     conn = db_module.get_connection()
     deleted = db_module.delete_visit_by_hex(conn, user_id=user_id, h3_index=body.geokey)
@@ -677,22 +675,8 @@ async def delete_circle(body: DeleteCircleRequest, user=Depends(get_current_user
 # Debug auth endpoints
 # -------------------------
 
-class Achievement(BaseModel):
-    id: int
-    code: str
-    name: str
-    description: str
-    icon: Optional[str]
-    unlocked: bool
-    created_at: Optional[datetime]
-
-
-class AuthRequest(BaseModel):
-    initData: str
-
-
 @app.post("/api/auth")
-async def debug_auth(body: AuthRequest, request: Request):
+async def debug_auth(body: models.AuthRequest, request: Request):
     logger.info(f"/api/auth called; initData length={len(body.initData)}")
     result = verify_init_data(body.initData, TELEGRAM_BOT_TOKEN)
     if not result.get("ok"):
@@ -723,6 +707,29 @@ async def debug_me(request: Request):
     return {"ok": True, "user": request.session.get("tg_user")}
 
 
+@app.get("/api/user/{user_id}", response_model=models.UserInfo)
+async def get_user(user_id: int):
+    """Get user information by internal user ID"""
+    conn = db_module.get_connection()
+    user_data = db_module.get_user_by_id(conn, user_id)
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    tg_id, username = user_data
+    return models.UserInfo(id=user_id, tg_id=tg_id, username=username)
+
+
+@app.post("/api/authenticate")
+async def authenticate(user=Depends(get_current_user)) -> Dict[str, Any]:
+    """Authenticate user and return user info with JWT-like token (simplified)"""
+    user_id, username = user
+    return {
+        "user_id": user_id,
+        "username": username,
+        "authenticated": True
+    }
+
+
 @app.get("/api/ping")
 async def ping():
     return {"ok": True}
@@ -751,7 +758,7 @@ async def dev_clear_db():
 
 @app.get(
     "/api/v1/districts",
-    response_model=List[DistrictFeatureResponse],
+    response_model=List[models.DistrictFeatureResponse],
 )
 async def list_districts(
     bbox: str = Query(..., description="minLon,minLat,maxLon,maxLat"),
@@ -773,7 +780,7 @@ async def list_districts(
         level=level,
     )
 
-    features: List[DistrictFeatureResponse] = []
+    features: List[models.DistrictFeatureResponse] = []
     for row in rows:
         bbox_values: Optional[List[float]] = None
         if (
@@ -815,7 +822,7 @@ async def list_districts(
 
         parent_id = row["parent_id"]
         features.append(
-            DistrictFeatureResponse(
+            models.DistrictFeatureResponse(
                 id=int(row["id"]),
                 name=str(row["name_ru"]),
                 level=str(row["level"]),
@@ -831,14 +838,14 @@ async def list_districts(
 
 @app.get(
     "/api/v1/districts/all",
-    response_model=List[DistrictFeatureResponse],
+    response_model=List[models.DistrictFeatureResponse],
 )
 async def list_all_districts(user=Depends(get_current_user)):
     user_id, _ = user
     conn = db_module.get_connection()
     rows = db_module.fetch_all_districts_with_user_progress(conn, user_id=user_id)
 
-    features: List[DistrictFeatureResponse] = []
+    features: List[models.DistrictFeatureResponse] = []
     for row in rows:
         bbox_values: Optional[List[float]] = None
         if (
@@ -880,7 +887,7 @@ async def list_all_districts(user=Depends(get_current_user)):
 
         parent_id = row["parent_id"]
         features.append(
-            DistrictFeatureResponse(
+            models.DistrictFeatureResponse(
                 id=int(row["id"]),
                 name=str(row["name_ru"]),
                 level=str(row["level"]),
@@ -896,7 +903,7 @@ async def list_all_districts(user=Depends(get_current_user)):
 
 @app.get(
     "/api/v1/district/{district_id}/cells",
-    response_model=DistrictCellsResponse,
+    response_model=models.DistrictCellsResponse,
 )
 async def get_district_cells(
     district_id: int,
@@ -931,7 +938,7 @@ async def get_district_cells(
         target_resolution,
     )
 
-    return DistrictCellsResponse(
+    return models.DistrictCellsResponse(
         district_id=district_id,
         resolution=target_resolution,
         base_resolution=base_resolution,
@@ -990,7 +997,7 @@ async def reveal_district(
     return {"new_hexagons": new_hexagons}
 
 
-@app.get("/api/v1/stats/summary", response_model=StatsSummaryResponse)
+@app.get("/api/v1/stats/summary", response_model=models.StatsSummaryResponse)
 async def get_stats_summary(
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
@@ -1007,7 +1014,7 @@ async def get_stats_summary(
             if cached_data:
                 logger.info(f"Stats summary cache hit for user {user_id}")
                 # Десериализуем из JSON
-                cached_response = StatsSummaryResponse.model_validate_json(cached_data)
+                cached_response = models.StatsSummaryResponse.model_validate_json(cached_data)
                 return cached_response
         except Exception as e:
             logger.warning(f"Error reading from Redis cache: {e}")
@@ -1026,10 +1033,10 @@ async def get_stats_summary(
     )
 
     okrug_rows = db_module.fetch_user_okrug_progress(conn, user_id=user_id)
-    okrugs: List[OkrugSummaryEntry] = []
+    okrugs: List[models.OkrugSummaryEntry] = []
     for row in okrug_rows:
         okrugs.append(
-            OkrugSummaryEntry(
+            models.OkrugSummaryEntry(
                 id=int(row["id"]),
                 name=str(row["name_ru"]),
                 parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
@@ -1043,10 +1050,10 @@ async def get_stats_summary(
         )
 
     bottom_rows = db_module.fetch_user_bottom_districts(conn, user_id=user_id, limit=3)
-    bottom_districts: List[DistrictSummaryEntry] = []
+    bottom_districts: List[models.DistrictSummaryEntry] = []
     for row in bottom_rows:
         bottom_districts.append(
-            DistrictSummaryEntry(
+            models.DistrictSummaryEntry(
                 id=int(row["id"]),
                 name=str(row["name_ru"]),
                 parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
@@ -1060,7 +1067,7 @@ async def get_stats_summary(
             )
         )
 
-    response = StatsSummaryResponse(
+    response = models.StatsSummaryResponse(
         total=total_progress,
         okrugs=okrugs,
         bottom_districts=bottom_districts,
@@ -1077,7 +1084,7 @@ async def get_stats_summary(
     return response
 
 
-@app.get("/api/v1/leaderboard", response_model=LeaderboardResponse)
+@app.get("/api/v1/leaderboard", response_model=models.LeaderboardResponse)
 async def get_leaderboard(
     level: Literal["district", "okrug"] = Query(
         "district", description="Aggregation level"),
@@ -1099,7 +1106,7 @@ async def get_leaderboard(
             if cached_data:
                 logger.info(f"Leaderboard cache hit for key: {cache_key}")
                 # Десериализуем из JSON
-                cached_response = LeaderboardResponse.model_validate_json(cached_data)
+                cached_response = models.LeaderboardResponse.model_validate_json(cached_data)
                 return cached_response
         except Exception as e:
             logger.warning(f"Error reading from Redis cache: {e}")
@@ -1111,7 +1118,7 @@ async def get_leaderboard(
     total_cells, total_weight = db_module.get_total_cells_and_weight(conn, level=level)
 
     if total_cells <= 0 and total_weight <= 0:
-        response = LeaderboardResponse(
+        response = models.LeaderboardResponse(
             level=level,
             period=period,
             generated_at=datetime.now(timezone.utc),
@@ -1125,7 +1132,7 @@ async def get_leaderboard(
             limit=limit,
         )
 
-        entries: List[LeaderboardEntry] = []
+        entries: List[models.LeaderboardEntry] = []
         for idx, row in enumerate(rows, start=1):
             visited_cells = int(row["visited_cells"] or 0)
             visited_weight = float(row["visited_weight"] or 0.0)
@@ -1139,7 +1146,7 @@ async def get_leaderboard(
                 percent_weight = round((visited_weight / total_weight) * 100.0, 2)
 
             entries.append(
-                LeaderboardEntry(
+                models.LeaderboardEntry(
                     rank=idx,
                     user_id=int(row["user_id"]),
                     username=row["username"],
@@ -1150,7 +1157,7 @@ async def get_leaderboard(
                 )
             )
 
-        response = LeaderboardResponse(
+        response = models.LeaderboardResponse(
             level=level,
             period=period,
             generated_at=datetime.now(timezone.utc),
@@ -1168,11 +1175,7 @@ async def get_leaderboard(
     return response
 
 
-@app.get("/api/v1/test")
-async def test_endpoint():
-    return {"message": "test works"}
-
-@app.get("/api/v1/me/achievements", response_model=List[Achievement])
+@app.get("/api/v1/me/achievements", response_model=List[models.Achievement])
 async def get_my_achievements(user=Depends(get_current_user)):
     user_id, _ = user
     conn = db_module.get_connection()
