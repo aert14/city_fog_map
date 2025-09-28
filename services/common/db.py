@@ -153,6 +153,22 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_user ON user_visits_atomic(user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_district_stats_user ON user_district_stats(user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_okrug_stats_user ON user_okrug_stats(user_id);")
+
+        # Add geom column to user_visits_atomic table if it doesn't exist
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_name = 'user_visits_atomic'
+                               AND column_name = 'geom') THEN
+                    ALTER TABLE user_visits_atomic ADD COLUMN geom GEOMETRY(Point, 4326);
+                END IF;
+            END $$;
+        """)
+
+        # Create spatial index on the geom column
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_geom ON user_visits_atomic USING GIST(geom);")
+
     conn.commit()
 
 
@@ -367,13 +383,15 @@ def record_visit_and_increment_stats(
     now_ts: Optional[int] = None,
 ) -> bool:
     ts = int(now_ts if now_ts is not None else time.time())
+    lat, lon = h3.cell_to_latlng(h3_index)
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO user_visits_atomic(user_id, h3, ts)
-            VALUES (%s, %s, %s) ON CONFLICT DO NOTHING
+            INSERT INTO user_visits_atomic(user_id, h3, ts, geom)
+            VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            ON CONFLICT DO NOTHING
             """,
-            (user_id, h3_index, ts),
+            (user_id, h3_index, ts, lon, lat),
         )
         added = cur.rowcount > 0
         if not added:
@@ -606,14 +624,18 @@ def select_user_hexes_in_bbox(
     max_lat: float,
     max_lon: float,
 ) -> List[str]:
-    # This function is inefficient and should be replaced with a spatial query if it were used.
-    # For now, keeping the logic but on Postgres.
-    hexagons: List[str] = []
-    for h3_index in select_user_hexes(conn, user_id):
-        lat, lon = h3.cell_to_latlng(h3_index)
-        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
-            hexagons.append(h3_index)
-    return hexagons
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT h3
+            FROM user_visits_atomic
+            WHERE user_id = %s
+              AND geom IS NOT NULL
+              AND ST_Intersects(geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+            """,
+            (user_id, min_lon, min_lat, max_lon, max_lat),
+        )
+        return [str(row[0]) for row in cur.fetchall()]
 
 
 # TODO: Consider implementing aggregate_hexagons for future optimization
