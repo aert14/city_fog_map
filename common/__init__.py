@@ -1,1 +1,0 @@
-# Common library for shared code across services

@@ -21,10 +21,7 @@ import psycopg2.extras
 from starlette.middleware.sessions import SessionMiddleware
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
-import sys
-import os
-# common is now in the same directory, no need to modify path
-from common import db as db_module
+from services.common import database as db_module
 from common import models
 import cache
 from redis.asyncio import Redis

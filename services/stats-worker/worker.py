@@ -16,10 +16,7 @@ import pika
 from prometheus_client import Counter, start_http_server
 from pythonjsonlogger import jsonlogger
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # добавляем services в path
-from common import db as db_module
+from services.common import database as db_module
 import cache
 import tracing
 

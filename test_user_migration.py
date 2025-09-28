@@ -9,7 +9,7 @@ sys.path.append('services')
 
 try:
     from common import models
-    from common import db
+    from services.common import database as db
     from fastapi import FastAPI
 
     # Test that UserInfo model can be instantiated
@@ -18,11 +18,11 @@ try:
 
     # Test that get_user_by_id function exists
     assert hasattr(db, 'get_user_by_id')
-    print("✓ get_user_by_id function exists in db module")
+    print("✓ get_user_by_id function exists in database module")
 
     # Test that ensure_user function exists (should already be there)
     assert hasattr(db, 'ensure_user')
-    print("✓ ensure_user function exists in db module")
+    print("✓ ensure_user function exists in database module")
 
     # Create a minimal FastAPI app to test the endpoints
     app = FastAPI(title="Test User API", version="1.0.0")

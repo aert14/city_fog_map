@@ -14,4 +14,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Define the command to run the application
+ENV PYTHONPATH=/app
 CMD ["python", "services/stats-worker/worker.py"]

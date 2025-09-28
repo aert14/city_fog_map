@@ -21,10 +21,7 @@ import psycopg2.extras
 from starlette.middleware.sessions import SessionMiddleware
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # добавляем services в path
-from common import db as db_module
+from services.common import database as db_module
 from common import models
 import cache
 from redis.asyncio import Redis
