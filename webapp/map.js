@@ -722,10 +722,12 @@ function fetchDistrictCells(districtId, resView = null) {
 export async function revealEntireDistrict(districtId, { updateHexagonsFromServer, addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons }) {
   // Always fetch cells with the server's base resolution to get all cells
   const serverBaseResolution = window.__CITY_FOG_BASE_RESOLUTION__ || 10;
+
   const detailed = await fetchDistrictCellsRaw(
     districtId,
     serverBaseResolution,
   );
+
   const meta = detailed.payload || detailed.meta;
   if (!meta || !Array.isArray(meta.cells) || meta.cells.length === 0) {
     throw new Error("No cells available for district");
@@ -744,6 +746,7 @@ export async function revealEntireDistrict(districtId, { updateHexagonsFromServe
   // Refresh the display after revealing
   const areaKm2 = getFeatureAreaKm2(state.selectedDistrictFeature);
   const desiredRes = pickResByArea(areaKm2);
+
   await Promise.all([
     updateHexagonsFromServer(),
     fetchDistrictCells(districtId, desiredRes),
@@ -754,18 +757,24 @@ export async function revealEntireDistrict(districtId, { updateHexagonsFromServe
 async function revealDistrictViaVisits(cells, { addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons }) {
   // Note: map is available in module scope
   if (!Array.isArray(cells) || cells.length === 0) return;
+
   let hasChanges = false;
+
   for (let i = 0; i < cells.length; i++) {
     const cell = cells[i];
     if (!cell || !cell.h3) continue;
+
     if (allKnownHexagons.has(cell.h3)) continue;
+
     const [lat, lng] = h3.cellToLatLng(cell.h3);
+
     try {
       const response = await fetch("/api/v1/visit", {
         method: "POST",
         headers: { "Content-Type": "application/json" }, // getAuthHeaders will be called from api module
         body: JSON.stringify({ lat, lon: lng }),
       });
+
       if (response.ok) {
         const result = await response.json();
 
@@ -793,6 +802,7 @@ async function revealDistrictViaVisits(cells, { addToSpatialIndex, updateDistric
       console.warn("[debug] reveal visit failed", { cell: cell.h3, err });
     }
   }
+
   if (hasChanges) {
     forceFogRedraw();
     if (map) map.triggerRepaint();
