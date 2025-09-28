@@ -16,8 +16,10 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 import h3
+import psycopg2
+import psycopg2.extras
 from starlette.middleware.sessions import SessionMiddleware
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger.jsonlogger import JsonFormatter
 
 import sys
 import os
@@ -39,7 +41,7 @@ for handler in logger.handlers[:]:
     logger.removeHandler(handler)
 
 # Create JSON formatter
-json_formatter = jsonlogger.JsonFormatter()
+json_formatter = JsonFormatter()
 
 # Create stream handler for stdout
 stream_handler = logging.StreamHandler(sys.stdout)
@@ -1171,5 +1173,27 @@ async def get_leaderboard(
             logger.warning(f"Error writing to Redis cache: {e}")
 
     return response
+
+
+@app.get("/api/v1/me/achievements", response_model=List[models.Achievement])
+async def get_my_achievements(user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                a.id, a.code, a.name, a.description, a.icon,
+                (ua.user_id IS NOT NULL) as unlocked,
+                ua.created_at
+            FROM achievements AS a
+            LEFT JOIN user_achievements AS ua
+                ON a.id = ua.achievement_id AND ua.user_id = %s
+            ORDER BY a.id;
+            """,
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
 
 

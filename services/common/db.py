@@ -149,6 +149,29 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS achievements (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL, -- Уникальный код, например 'FIRST_STEP'
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                icon TEXT -- Путь к иконке или ее код
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_achievements (
+                user_id INTEGER NOT NULL,
+                achievement_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, achievement_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (achievement_id) REFERENCES achievements(id)
+            );
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_h3 ON user_visits_atomic(h3);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_user ON user_visits_atomic(user_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_district_stats_user ON user_district_stats(user_id);")
@@ -168,6 +191,17 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
 
         # Create spatial index on the geom column
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_visits_atomic_geom ON user_visits_atomic USING GIST(geom);")
+
+        # Insert basic achievements
+        cur.execute(
+            """
+            INSERT INTO achievements (code, name, description, icon) VALUES
+            ('FIRST_STEP', 'Первый шаг', 'Исследовать свою первую территорию.', 'footprints'),
+            ('EXPLORER_100', 'Исследователь', 'Исследовать 100 территорий.', 'compass'),
+            ('CARTOGRAPHER_1000', 'Картограф', 'Исследовать 1000 территорий.', 'map')
+            ON CONFLICT (code) DO NOTHING;
+            """
+        )
 
     conn.commit()
 
@@ -326,7 +360,7 @@ def clear_all(conn: psycopg2.extensions.connection) -> tuple[int, int]:
         cur.execute("SELECT COUNT(*) FROM users")
         count_users = int(cur.fetchone()[0])
 
-        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats RESTART IDENTITY")
+        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats, user_achievements RESTART IDENTITY")
         conn.commit()
         return count_circles, count_users
 
@@ -1131,3 +1165,40 @@ def update_visit_statistics(
         conn.rollback()
         logger.error(f"Failed to update visit statistics: {e}")
         return False
+
+
+def check_and_grant_achievements(
+    conn: psycopg2.extensions.connection, user_id: int
+):
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # 1. Получаем общее количество визитов пользователя
+
+        cur.execute("SELECT COUNT(*) as visit_count FROM user_visits_atomic WHERE user_id = %s", (user_id,))
+        visit_count = cur.fetchone()['visit_count']
+
+        # 2. Получаем все существующие ачивки
+        cur.execute("SELECT id, code FROM achievements")
+        achievements = {row['code']: row['id'] for row in cur.fetchall()}
+
+        # 3. Определяем, какие ачивки нужно выдать
+        to_grant = []
+        if visit_count >= 1 and 'FIRST_STEP' in achievements:
+            to_grant.append(achievements['FIRST_STEP'])
+        if visit_count >= 100 and 'EXPLORER_100' in achievements:
+            to_grant.append(achievements['EXPLORER_100'])
+        if visit_count >= 1000 and 'CARTOGRAPHER_1000' in achievements:
+            to_grant.append(achievements['CARTOGRAPHER_1000'])
+
+        # 4. Вставляем новые ачивки, игнорируя существующие
+        if to_grant:
+            args_str = ','.join(
+                cur.mogrify("(%s,%s)", (user_id, ach_id)).decode('utf-8')
+                for ach_id in to_grant
+            )
+            cur.execute(
+                f"""
+                INSERT INTO user_achievements (user_id, achievement_id) VALUES {args_str}
+                ON CONFLICT (user_id, achievement_id) DO NOTHING
+                """
+            )
+    conn.commit()

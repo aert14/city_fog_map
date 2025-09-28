@@ -140,6 +140,15 @@ def process_visit_message(message: Dict[str, Any]) -> bool:
                     logger.info(f"Invalidated cache for user {user_id} stats summary")
             except Exception as e:
                 logger.warning(f"Failed to invalidate cache: {e}")
+
+            # Check and grant achievements
+            try:
+                logger.info(f"Checking achievements for user {user_id}")
+                db_module.check_and_grant_achievements(conn, user_id)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to check achievements for user {user_id}: {e}"
+                )
         else:
             logger.error(f"Failed to update statistics for user {user_id}")
             jobs_failed_total.inc()  # Increment failed jobs counter

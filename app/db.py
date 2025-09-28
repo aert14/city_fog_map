@@ -285,7 +285,7 @@ def clear_all(conn: psycopg2.extensions.connection) -> tuple[int, int]:
         cur.execute("SELECT COUNT(*) FROM users")
         count_users = int(cur.fetchone()[0])
 
-        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats RESTART IDENTITY")
+        cur.execute("TRUNCATE circles, users, user_settings, user_visits_atomic, user_district_stats, user_okrug_stats, user_achievements RESTART IDENTITY")
         conn.commit()
         return count_circles, count_users
 

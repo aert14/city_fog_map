@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: ./services/monolith/Dockerfile
+    volumes:
+      - ./services:/app/services:ro
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
@@ -120,6 +122,25 @@ services:
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest
+
+  stats-worker:
+    build:
+      context: .
+      dockerfile: ./services/stats-worker/Dockerfile
+    volumes:
+      - ./services:/app/services:ro
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/gis
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
 
 volumes:
   postgres_data:

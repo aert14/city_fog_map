@@ -121,3 +121,13 @@ class UserInfo(BaseModel):
     id: int
     tg_id: int
     username: Optional[str]
+
+
+class Achievement(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: str
+    icon: Optional[str]
+    unlocked: bool
+    created_at: Optional[datetime]

@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 import h3
+import psycopg2
+import psycopg2.extras
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as db_module
@@ -428,6 +430,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
+# Test endpoint to verify registration works
+@app.get("/api/v1/test-early")
+async def test_early():
+    return {"message": "early test works"}
+
 # Static frontend at /webapp
 webapp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp")
 if not os.path.isdir(webapp_dir):
@@ -669,6 +676,16 @@ async def delete_circle(body: DeleteCircleRequest, user=Depends(get_current_user
 # -------------------------
 # Debug auth endpoints
 # -------------------------
+
+class Achievement(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: str
+    icon: Optional[str]
+    unlocked: bool
+    created_at: Optional[datetime]
+
 
 class AuthRequest(BaseModel):
     initData: str
@@ -1149,5 +1166,31 @@ async def get_leaderboard(
             logger.warning(f"Error writing to Redis cache: {e}")
 
     return response
+
+
+@app.get("/api/v1/test")
+async def test_endpoint():
+    return {"message": "test works"}
+
+@app.get("/api/v1/me/achievements", response_model=List[Achievement])
+async def get_my_achievements(user=Depends(get_current_user)):
+    user_id, _ = user
+    conn = db_module.get_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                a.id, a.code, a.name, a.description, a.icon,
+                (ua.user_id IS NOT NULL) as unlocked,
+                ua.created_at
+            FROM achievements AS a
+            LEFT JOIN user_achievements AS ua
+                ON a.id = ua.achievement_id AND ua.user_id = %s
+            ORDER BY a.id;
+            """,
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
 
 

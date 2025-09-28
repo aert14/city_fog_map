@@ -357,6 +357,43 @@ body {
   color: var(--text-primary);
 }
 
+/* Стили для оверлея и панели профиля (похожи на лидерборд для консистентности) */
+.profile-overlay {
+  position: fixed; inset: 0; background: rgba(10, 10, 16, 0.72);
+  backdrop-filter: blur(12px); display: none; align-items: center;
+  justify-content: center; z-index: 100;
+}
+.profile-panel {
+  width: min(500px, 92vw); max-height: 88vh; display: flex; flex-direction: column;
+  background: rgba(17, 24, 39, 0.92); border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+  padding: 20px; gap: 16px;
+}
+.profile-header { display: flex; align-items: center; justify-content: space-between; }
+.profile-header h2 { font-size: 20px; font-weight: 700; margin: 0; }
+.profile-content { overflow-y: auto; padding-right: 10px; }
+
+/* Стили для списка достижений */
+.achievements-list { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.achievement-item {
+  display: flex; align-items: center; gap: 16px;
+  background: rgba(30, 41, 59, 0.5); padding: 12px; border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  filter: grayscale(80%); opacity: 0.6; transition: all 0.2s ease;
+}
+.achievement-item.unlocked {
+  filter: grayscale(0%); opacity: 1;
+  border-color: rgba(14, 165, 233, 0.4);
+}
+.achievement-icon { width: 48px; height: 48px; flex-shrink: 0; } /* Тут будет иконка */
+.achievement-details h4 { margin: 0 0 4px; font-size: 16px; color: var(--text-primary); }
+.achievement-details p { margin: 0; font-size: 14px; color: var(--text-secondary); }
+.loader-sm { /* Маленький спиннер */
+  width: 24px; height: 24px; border: 3px solid rgba(14, 165, 233, 0.2);
+  border-top-color: var(--primary-color); border-radius: 50%;
+  animation: spin 1s linear infinite; margin: 20px auto;
+}
+
 @media (max-width: 600px) {
   .leaderboard-panel {
     width: 96vw;

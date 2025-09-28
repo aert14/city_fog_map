@@ -50,6 +50,10 @@
   const leaderboardStatus = document.getElementById("leaderboardStatus");
   const leaderboardBody = document.getElementById("leaderboardBody");
   const toggleFogBtn = document.getElementById("toggleFogBtn");
+  const profileBtn = document.getElementById("hud-profile-btn");
+  const profileOverlay = document.getElementById("profile-overlay");
+  const profileCloseBtn = document.getElementById("profile-close-btn");
+  const achievementsList = document.getElementById("achievements-list");
   const countEl = document.getElementById("hud-count");
   const fogCanvas = document.getElementById("fog-canvas");
   const fogCtx = fogCanvas.getContext("2d");
@@ -1639,6 +1643,27 @@
 
   document.addEventListener("keydown", handleLeaderboardKey);
 
+  if (profileBtn) {
+    profileBtn.addEventListener('click', () => {
+      profileOverlay.style.display = 'flex';
+      fetchAndRenderAchievements(); // Загружаем данные при открытии
+    });
+  }
+
+  if (profileCloseBtn) {
+    profileCloseBtn.addEventListener('click', () => {
+      profileOverlay.style.display = 'none';
+    });
+  }
+
+  if (profileOverlay) {
+    profileOverlay.addEventListener('click', (event) => {
+      if (event.target === profileOverlay) { // Закрытие по клику на фон
+        profileOverlay.style.display = 'none';
+      }
+    });
+  }
+
   if (revealDistrictBtn) {
     revealDistrictBtn.addEventListener("click", async () => {
       if (!selectedDistrictId) {
@@ -1713,4 +1738,44 @@
       deleteHexAtPoint(e.point);
     }
   });
+
+  async function fetchAndRenderAchievements() {
+    if (!achievementsList) return;
+    achievementsList.innerHTML = '<div class="loader-sm"></div>'; // Показываем загрузчик
+
+    try {
+      const response = await fetch('/api/v1/me/achievements', { headers: getAuthHeaders() });
+      if (!response.ok) throw new Error('Failed to load achievements');
+
+      const achievements = await response.json();
+      achievementsList.innerHTML = ''; // Очищаем
+
+      if (achievements.length === 0) {
+        achievementsList.textContent = 'Достижений пока нет.';
+        return;
+      }
+
+      achievements.forEach(ach => {
+        const item = document.createElement('div');
+        item.className = 'achievement-item';
+        if (ach.unlocked) {
+          item.classList.add('unlocked');
+        }
+
+        // TODO: Иконки можно будет добавить позже, пока плейсхолдер
+        item.innerHTML = `
+          <div class="achievement-icon" style="background: #334155;"></div>
+          <div class="achievement-details">
+            <h4>${ach.name}</h4>
+            <p>${ach.description}</p>
+          </div>
+        `;
+        achievementsList.appendChild(item);
+      });
+
+    } catch (error) {
+      console.error('Achievement fetch error:', error);
+      achievementsList.innerHTML = '<p style="color: #f87171;">Не удалось загрузить достижения.</p>';
+    }
+  }
 })();
