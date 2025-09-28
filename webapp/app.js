@@ -98,6 +98,7 @@ import { addVisitAt, deleteHexAtPoint, updateHexagonsFromServer } from './api.js
     state.fogDataChanged = wasChanged;
   }
 
+
   // Initialize UI components
   const uiControls = initializeUI({
     map,
@@ -124,7 +125,12 @@ import { addVisitAt, deleteHexAtPoint, updateHexagonsFromServer } from './api.js
       countEl,
       forceFogRedraw,
       loader
-    })
+    }),
+    allKnownHexagons: state.allKnownHexagons,
+    addToSpatialIndex,
+    updateDistrictProgress: (district, okrug) => updateDistrictProgress(district, okrug, { map }),
+    countEl,
+    forceFogRedraw
   });
 
   // Show debug controls if needed

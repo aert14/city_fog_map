@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Modules</title>
+</head>
+<body>
+    <h1>Testing Module Imports</h1>
+    <div id="output"></div>
+
+    <script type="module">
+        const output = document.getElementById('output');
+
+        try {
+            // Test basic imports
+            output.innerHTML += '<p>Testing basic module loading...</p>';
+
+            // This will test if the modules can be imported without errors
+            import('./webapp/state.js').then(module => {
+                output.innerHTML += '<p>✅ state.js imported successfully</p>';
+                console.log('state module:', module);
+            }).catch(err => {
+                output.innerHTML += '<p>❌ Failed to import state.js: ' + err.message + '</p>';
+            });
+
+            import('./webapp/api.js').then(module => {
+                output.innerHTML += '<p>✅ api.js imported successfully</p>';
+                console.log('api module:', module);
+            }).catch(err => {
+                output.innerHTML += '<p>❌ Failed to import api.js: ' + err.message + '</p>';
+            });
+
+            output.innerHTML += '<p>Module loading tests initiated. Check console for details.</p>';
+
+        } catch (error) {
+            output.innerHTML += '<p>❌ Error in test script: ' + error.message + '</p>';
+        }
+    </script>
+</body>
+</html>

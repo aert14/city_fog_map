@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Reveal District</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+    <script src="/webapp/fog.js"></script>
+    <style>
+        body { margin: 0; padding: 20px; font-family: Arial, sans-serif; }
+        #map { width: 100%; height: 400px; border: 1px solid #ccc; }
+        .controls { margin: 10px 0; }
+        button { padding: 8px 16px; margin: 0 5px; }
+    </style>
+</head>
+<body>
+    <h1>Test Reveal District</h1>
+    <div id="map"></div>
+    <div class="controls">
+        <button onclick="testSelectDistrict()">Select Test District</button>
+        <button onclick="testRevealDistrict()">Reveal District</button>
+        <button onclick="checkState()">Check State</button>
+    </div>
+    <div id="log"></div>
+
+    <script type="module">
+        import { state } from '/webapp/state.js';
+        import { handleDistrictSelection, revealEntireDistrict } from '/webapp/map.js';
+        import { getAuthHeaders } from '/webapp/api.js';
+
+        window.state = state;
+
+        const log = document.getElementById('log');
+
+        function addLog(message) {
+            log.innerHTML += '<div>' + new Date().toLocaleTimeString() + ': ' + message + '</div>';
+            console.log(message);
+        }
+
+        // Initialize map
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: 'https://api.maptiler.com/maps/01999189-4baa-7e39-a599-8526afdd67ae/style.json?key=APpVE6JSa2fSgJJvdPyv',
+            center: [37.6173, 55.7558],
+            zoom: 10
+        });
+
+        window.testSelectDistrict = function() {
+            addLog('Selecting test district...');
+            // Simulate selecting a district
+            const testFeature = {
+                properties: {
+                    id: 364001, // Test district ID
+                    name: "Test District"
+                }
+            };
+
+            handleDistrictSelection(testFeature);
+            addLog('District selected: ' + state.selectedDistrictId);
+        };
+
+        window.testRevealDistrict = async function() {
+            addLog('Starting reveal district test...');
+
+            if (!state.selectedDistrictId) {
+                addLog('ERROR: No district selected!');
+                return;
+            }
+
+            addLog('Selected district ID: ' + state.selectedDistrictId);
+
+            const mockParams = {
+                updateHexagonsFromServer: async () => {
+                    addLog('Mock updateHexagonsFromServer called');
+                },
+                addToSpatialIndex: (hex) => {
+                    addLog('Mock addToSpatialIndex called with: ' + hex);
+                },
+                updateDistrictProgress: (district, okrug) => {
+                    addLog('Mock updateDistrictProgress called');
+                },
+                countEl: { textContent: '0' },
+                forceFogRedraw: () => {
+                    addLog('Mock forceFogRedraw called');
+                },
+                allKnownHexagons: new Set()
+            };
+
+            try {
+                await revealEntireDistrict(state.selectedDistrictId, mockParams);
+                addLog('Reveal district completed successfully');
+            } catch (error) {
+                addLog('ERROR: ' + error.message);
+                console.error(error);
+            }
+        };
+
+        window.checkState = function() {
+            addLog('Current state:');
+            addLog('- selectedDistrictId: ' + state.selectedDistrictId);
+            addLog('- allKnownHexagons size: ' + state.allKnownHexagons.size);
+            console.log('Full state:', state);
+        };
+
+        addLog('Test page loaded. Use buttons above to test functionality.');
+    </script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Map</title>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet">
+    <style>
+        #map { width: 100%; height: 400px; }
+    </style>
+</head>
+<body>
+    <h1>Testing Map Initialization</h1>
+    <div id="map"></div>
+    <div id="status"></div>
+
+    <script>
+        const status = document.getElementById('status');
+        status.textContent = 'Initializing map...';
+
+        try {
+            const map = new maplibregl.Map({
+                container: 'map',
+                style: 'https://api.maptiler.com/maps/01999189-4baa-7e39-a599-8526afdd67ae/style.json?key=APpVE6JSa2fSgJJvdPyv',
+                center: [37.6173, 55.7558],
+                zoom: 12,
+                maxBounds: [[36.0, 55.0], [39.0, 56.5]]
+            });
+
+            map.on('load', () => {
+                status.textContent = 'Map loaded successfully!';
+                console.log('Map initialized:', map);
+            });
+
+            map.on('error', (e) => {
+                status.textContent = 'Map error: ' + e.error.message;
+                console.error('Map error:', e);
+            });
+        } catch (error) {
+            status.textContent = 'Error: ' + error.message;
+            console.error('Initialization error:', error);
+        }
+    </script>
+</body>
+</html>

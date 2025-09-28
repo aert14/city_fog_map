@@ -719,7 +719,11 @@ function fetchDistrictCells(districtId, resView = null) {
     });
 }
 
-export async function revealEntireDistrict(districtId, { updateHexagonsFromServer, addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons }) {
+export async function revealEntireDistrict(districtId, { updateHexagonsFromServer, addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons } = {}) {
+  if (allKnownHexagons === undefined) {
+    throw new Error('allKnownHexagons is required but was: ' + allKnownHexagons);
+  }
+
   // Always fetch cells with the server's base resolution to get all cells
   const serverBaseResolution = window.__CITY_FOG_BASE_RESOLUTION__ || 10;
 
@@ -734,6 +738,7 @@ export async function revealEntireDistrict(districtId, { updateHexagonsFromServe
   }
 
   const revealCells = meta.cells;
+
 
   await revealDistrictViaVisits(revealCells, {
     addToSpatialIndex,
@@ -754,7 +759,11 @@ export async function revealEntireDistrict(districtId, { updateHexagonsFromServe
   // Note: District layers are now loaded statically and don't need refresh
 }
 
-async function revealDistrictViaVisits(cells, { addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons }) {
+async function revealDistrictViaVisits(cells, { addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons } = {}) {
+  if (allKnownHexagons === undefined) {
+    throw new Error('allKnownHexagons is required in revealDistrictViaVisits but was: ' + allKnownHexagons);
+  }
+
   // Note: map is available in module scope
   if (!Array.isArray(cells) || cells.length === 0) return;
 
