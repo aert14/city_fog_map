@@ -27,6 +27,7 @@ from common import models
 import cache
 from redis.asyncio import Redis
 import tracing
+import queue
 
 
 # Configure JSON logging
@@ -345,6 +346,9 @@ async def lifespan(app: FastAPI):
     # Initialize Redis
     await cache.init_redis_pool()
 
+    # Initialize RabbitMQ
+    await queue.init_rabbitmq_connection()
+
     # Initialize database
     logger.info("Database initialization...")
     conn = db_module.get_connection()
@@ -358,6 +362,9 @@ async def lifespan(app: FastAPI):
 
     # Close Redis connection
     await cache.close_redis_pool()
+
+    # Close RabbitMQ connection
+    await queue.close_rabbitmq_connection()
 
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
@@ -581,6 +588,21 @@ async def visit_area(
             logger.info(f"Invalidated cache for user {user_id} stats summary")
         except Exception as e:
             logger.warning(f"Error invalidating Redis cache: {e}")
+
+    # Отправляем сообщение в RabbitMQ о визите
+    if added:  # Только если визит был добавлен (не повтор)
+        try:
+            current_timestamp = int(time.time())
+            await queue.publish_visit_message(
+                user_id=user_id,
+                h3_geokey=geokey,
+                lat=lat,
+                lon=lon,
+                timestamp=current_timestamp
+            )
+        except Exception as e:
+            logger.error(f"Error publishing visit message to RabbitMQ for user {user_id}: {e}")
+            # Не прерываем обработку визита из-за ошибки RabbitMQ
 
     # Обновляем данные последнего визита в Redis
     if redis_client:
