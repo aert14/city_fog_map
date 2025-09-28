@@ -1,136 +1,111 @@
-# City Fog Map
+# City Fog Map - Туман войны
 
-City Fog Map is a Telegram Mini App that allows users to "unfog" a map by exploring their surroundings. It's built with FastAPI on the backend and a vanilla JavaScript frontend using MapLibre GL.
+[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/downloads/release/python-311/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/Docker-Powered-blue?logo=docker)](https://www.docker.com/)
 
-## Features
+<!-- Вставьте сюда скриншот или GIF-анимацию вашего приложения -->
+![Скриншот City Fog Map](webapp/image.png)
 
-*   **Telegram Mini App Integration:** Authenticates users securely via their Telegram client.
-*   **Interactive Map:** Uses MapLibre GL to display an interactive map.
-*   **"Fog of War" Effect:** Unexplored areas are covered in a "fog of war" that users can clear by visiting locations.
-*   **Geospatial Indexing:** Uses H3 for efficient storage and retrieval of explored areas.
-*   **Debug Mode:** Includes a debug mode for easy development and testing.
+## 🚀 Описание проекта
 
-## Architecture
+**City Fog Map** — это веб-игра "Туман войны", реализованная как Telegram Mini App. Игроки могут "расчищать туман" на интерактивной карте, посещая различные локации в реальном мире. Основная механика игры заключается в геолокационном взаимодействии: пользователь отмечает свое посещение точки на карте, что приводит к расчистке области вокруг этой точки от "тумана войны".
 
-The application is built with a microservices architecture using Docker containers:
+### ✨ Ключевые возможности
 
-1.  **Backend Services:** Multiple Python-based services powered by FastAPI:
-    - **monolith:** Main web service serving static files and API endpoints
-    - **geo-service:** Handles geospatial operations and H3 indexing
-    - **user-service:** Manages user authentication and sessions
-    - **visit-service:** Processes visit events via RabbitMQ message queue
-    - **stats-worker:** Background worker for statistics processing
+- **Интерактивная карта:** Визуализация прогресса на карте с использованием MapLibre GL.
+- **Механика "Тумана войны":** Исследованные области открываются, создавая уникальную карту для каждого игрока.
+- **Прогресс по районам:** Статистика по исследованию административных районов и округов.
+- **Таблицы лидеров:** Соревновательный элемент с рейтингами игроков за неделю и сезон.
+- **Система достижений:** Игроки получают награды за достижение определенных целей.
+- **Интеграция с Telegram:** Бесшовная аутентификация и запуск через платформу Telegram Mini Apps.
 
-2.  **Frontend:** A vanilla JavaScript single-page application that runs as a Telegram Mini App. It uses MapLibre GL for rendering the map and interacts with the backend via REST APIs.
+## 🏗️ Архитектура
 
-3.  **Infrastructure:**
-    - **PostgreSQL with PostGIS:** Database for geospatial data
-    - **Redis:** Caching and session storage
-    - **RabbitMQ:** Message queue for async processing
-    - **Nginx:** Reverse proxy and load balancer
+Проект построен на основе монолитного бэкенда с асинхронным воркером для обработки данных, развернутых в Docker-контейнерах.
 
-The application uses Docker Compose for easy deployment and localtunnel for exposing the local development environment to the internet.
+1.  **Monolith API (FastAPI)** — основной веб-сервис, который обслуживает API для фронтенда, выполняет аутентификацию и отправляет задачи в очередь.
+2.  **Stats Worker** — фоновый воркер, который получает сообщения из RabbitMQ и асинхронно обновляет статистику и достижения пользователей.
+3.  **PostgreSQL + PostGIS** — основная база данных для хранения информации о пользователях, визитах, районах и других геопространственных данных.
+4.  **Redis** — используется для кэширования ответов API (например, таблиц лидеров и сводок статистики) и для реализации Rate Limiting.
+5.  **RabbitMQ** — очередь сообщений для асинхронной и надежной обработки визитов.
+6.  **Nginx** — выступает в роли обратного прокси для основного API.
+7.  **Стек мониторинга** — Prometheus, Grafana, Loki и Tempo для сбора метрик, логов и трейсов.
 
-## Getting Started
+## 🛠️ Стек технологий
 
-### Prerequisites
+-   **Backend:** Python 3.11, FastAPI
+-   **Frontend:** Vanilla JavaScript (ES Modules), MapLibre GL JS, H3-js
+-   **База данных:** PostgreSQL, PostGIS
+-   **Кэш:** Redis
+-   **Очередь сообщений:** RabbitMQ
+-   **Инфраструктура:** Docker, Docker Compose, Nginx
+-   **Наблюдаемость:** OpenTelemetry, Prometheus, Grafana, Loki, Tempo
 
-*   Docker and Docker Compose
-*   A Telegram Bot Token (get one from [@BotFather](https://t.me/BotFather))
-*   Node.js with npm (for localtunnel, if not using Docker)
+## 💻 Локальный запуск
 
-### Installation
+### 1. Предварительные требования
 
-1.  **Clone the repository:**
+-   Установленные **Docker** и **Docker Compose**.
+-   **Токен Telegram-бота**. Его можно получить у [@BotFather](https://t.me/BotFather).
 
-    ```bash
-    git clone https://github.com/your-username/city-fog-map.git
-    cd city-fog-map
-    ```
+### 2. Конфигурация
 
-### Running the Application
+Клонируйте репозиторий и создайте файл `.env` в корне проекта:
 
-1.  **Set the Telegram Bot Token:**
+```bash
+git clone <repository-url>
+cd city_fog_map
+```
 
-    ```bash
-    export TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
-    ```
+Содержимое файла `.env`:
 
-2.  **Start all services with Docker Compose:**
+```env
+# Замените на ваш токен, полученный от @BotFather
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+```
 
-    ```bash
-    make up
-    ```
+### 3. Запуск
 
-    This will start all services including PostgreSQL, Redis, RabbitMQ, and the application services.
+Запустите все сервисы с помощью Docker Compose:
 
-3.  **Check that services are running:**
+```bash
+docker-compose up --build -d
+```
 
-    ```bash
-    make logs
-    ```
+### 4. Импорт геоданных (Обязательный шаг!)
 
-4.  **Expose your local server to the internet:**
+После первого запуска база данных будет пустой. Необходимо загрузить в нее геоданные о районах и рассчитать гексагональную сетку.
 
-    ```bash
-    make tunnel
-    ```
+Выполните следующие команды:
 
-    This uses localtunnel to expose port 80 to the internet. Check the tunnel status:
+```bash
+# 1. Импортируем геометрию районов и округов в PostgreSQL
+docker-compose exec monolith python tools/import_data_to_postgres.py
 
-    ```bash
-    make tunnel-status
-    ```
+# 2. Рассчитываем и сохраняем H3-ячейки для каждого района (может занять несколько минут)
+docker-compose exec monolith python tools/build_district_cells.py
+```
 
-    Localtunnel will give you a public HTTPS URL (e.g., `https://aert0.loca.lt`).
+После выполнения этих шагов приложение полностью готово к работе.
 
-5.  **Configure your Telegram Bot:**
+## 🌐 Доступ к сервисам
 
-    *   Talk to [@BotFather](https://t.me/BotFather) on Telegram.
-    *   Use the `/setdomain` command to link your bot to the tunnel URL.
-    *   Create a menu button for your bot with the URL pointing to your web app (e.g., `https://aert0.loca.lt/webapp/`).
+-   **Веб-приложение:** `http://localhost/`
+-   **API документация (Swagger):** `http://localhost/docs`
+-   **API документация (ReDoc):** `http://localhost/redoc`
+-   **RabbitMQ Management:** `http://localhost:15672` (логин: `guest`, пароль: `guest`)
+-   **Grafana:** `http://localhost:3000` (логин: `admin`, пароль: `admin`)
+-   **Prometheus:** `http://localhost:9090`
 
-### Available Make Commands
+## 🧪 Тестирование
 
-*   `make up` - Start all services
-*   `make down` - Stop all services
-*   `make build` - Rebuild all services
-*   `make logs` - Show logs from all services
-*   `make tunnel` - Start localtunnel to expose port 80
-*   `make tunnel-status` - Check tunnel status and get URL
-*   `make kill` - Stop tunnel and clean up
-*   `make clean` - Remove all containers and volumes
+Для запуска автоматических тестов используйте следующую команду:
 
-## API Endpoints
+```bash
+docker-compose exec monolith pytest
+```
 
-The backend exposes the following API endpoints:
+## 📜 Лицензия
 
-*   `POST /api/v1/visit`: Records a user's visit to a specific location.
-    *   **Body:** `{ "lat": float, "lon": float }`
-    *   **Response:** `{ "added": int, "circle": object, "stats": object }`
-*   `GET /api/v1/circles`: Retrieves the explored areas (as H3 hexagons) for the current user within a given bounding box.
-    *   **Query Parameter:** `bbox=minLon,minLat,maxLon,maxLat`
-    *   **Response:** `{ "hexagons": [str] }`
-*   `POST /api/v1/radius`: Sets the exploration radius for the current user.
-    *   **Body:** `{ "radius_m": int }`
-    *   **Response:** `{ "updated": int, "h3_resolution": int, "resolution_changed": bool }`
-*   `DELETE /api/v1/circle`: Deletes a specific explored hexagon.
-    *   **Body:** `{ "geokey": str }`
-    *   **Response:** `{ "deleted": int }`
-
-## Development
-
-### Debug Mode
-
-To make development easier, you can run the application in one of two debug modes:
-
-*   **`NO_AUTH_MODE`:** Bypasses Telegram authentication and uses a fixed local user. This is useful for testing the frontend in a regular web browser. To enable it, set the `NO_AUTH_MODE` environment variable:
-    ```bash
-    export NO_AUTH_MODE=1
-    ```
-*   **`DEBUG_AUTH_MODE`:** Enables the debug authentication flow, which uses a session cookie instead of the `X-Telegram-Init` header. This is useful for debugging the authentication process itself. To enable it, set the `DEBUG_AUTH_MODE` environment variable:
-    ```bash
-    export DEBUG_AUTH_MODE=1
-    ```
-
-When either of these modes is enabled, a debug panel will be visible in the frontend, allowing you to change the exploration radius, delete hexagons, and clear the database.
+Этот проект распространяется под лицензией MIT. Подробности смотрите в файле [LICENSE](LICENSE).

@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 import h3
 import psycopg2.extras
 
@@ -278,6 +278,18 @@ async def list_districts(
     ),
     user=Depends(get_current_user),
 ):
+    """List districts within a bounding box.
+
+    Returns a list of districts or okrugs that intersect with the specified
+    bounding box. Each district includes progress information for the authenticated user.
+
+    Args:
+        bbox: Bounding box coordinates in format "minLon,minLat,maxLon,maxLat"
+        level: Administrative level to return - either "okrug" or "district"
+
+    Returns:
+        List of district features with geometry and user progress data.
+    """
     user_id, _ = user
     min_lon, min_lat, max_lon, max_lat = _parse_bbox(bbox)
     conn = db_module.get_connection()
@@ -352,6 +364,14 @@ async def list_districts(
     response_model=List[models.DistrictFeatureResponse],
 )
 async def list_all_districts(user=Depends(get_current_user)):
+    """List all districts with user progress.
+
+    Returns all districts in the system along with the authenticated user's
+    progress information for each district.
+
+    Returns:
+        List of all district features with user progress data.
+    """
     user_id, _ = user
     conn = db_module.get_connection()
     rows = db_module.fetch_all_districts_with_user_progress(conn, user_id=user_id)
@@ -417,12 +437,25 @@ async def list_all_districts(user=Depends(get_current_user)):
     response_model=models.DistrictCellsResponse,
 )
 async def get_district_cells(
-    district_id: int,
+    district_id: int = Path(..., description="Internal ID of the district"),
     res_view: Optional[str] = Query(
         None, description="Optional H3 resolution to aggregate to (<= base)"
     ),
     user=Depends(get_current_user),
 ):
+    """Get cells and progress for a specific district.
+
+    Returns the H3 cells that make up a district, along with visit status
+    for each cell for the authenticated user. Can optionally aggregate cells
+    to a higher resolution level.
+
+    Args:
+        district_id: Internal ID of the district
+        res_view: Optional H3 resolution to aggregate cells to (must be <= base resolution)
+
+    Returns:
+        District cells response with H3 cells and their visit status.
+    """
     user_id, _ = user
     conn = db_module.get_connection()
     district_row = db_module.get_district_by_id(conn, district_id)
@@ -459,10 +492,22 @@ async def get_district_cells(
 
 @router.post("/district/{district_id}/reveal")
 async def reveal_district(
-    district_id: int,
-    payload: Dict[str, Any],
+    district_id: int = Path(..., description="Internal ID of the district to reveal cells in"),
     user=Depends(get_current_user),
+    payload: Optional[Dict[str, Any]] = None,
 ):
+    """Reveal (visit) cells in a district.
+
+    Records visits to specific H3 cells within a district for the authenticated user.
+    Only works in debug or no-auth mode. Updates user progress statistics.
+
+    Args:
+        district_id: Internal ID of the district
+        payload: Request body containing optional "cells" array of H3 indices to visit
+
+    Returns:
+        Object with "new_hexagons" array containing newly visited H3 indices.
+    """
     from services.monolith.main import DEBUG_AUTH_MODE, NO_AUTH_MODE
 
     user_id, _ = user

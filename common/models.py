@@ -4,8 +4,8 @@ from datetime import datetime
 
 
 class VisitRequest(BaseModel):
-    lat: float = Field(..., ge=-90.0, le=90.0)
-    lon: float = Field(..., ge=-180.0, le=180.0)
+    lat: float = Field(..., ge=-90.0, le=90.0, description="Latitude of the visit location")
+    lon: float = Field(..., ge=-180.0, le=180.0, description="Longitude of the visit location")
 
 
 class Circle(BaseModel):
@@ -110,11 +110,11 @@ class LeaderboardResponse(BaseModel):
 
 
 class DeleteCircleRequest(BaseModel):
-    geokey: str = Field(..., min_length=10, max_length=20)
+    geokey: str = Field(..., min_length=10, max_length=20, description="H3 geokey of the circle to delete")
 
 
 class AuthRequest(BaseModel):
-    initData: str
+    initData: str = Field(..., description="Telegram WebApp initialization data for authentication")
 
 
 class UserInfo(BaseModel):

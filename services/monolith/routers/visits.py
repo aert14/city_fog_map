@@ -2,7 +2,7 @@ import math
 import time
 import logging
 from typing import Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 import h3
 from redis.asyncio import Redis
 
@@ -226,6 +226,18 @@ async def visit_area(
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
+    """Record a visit to a geographic location.
+
+    Records that the authenticated user has visited a specific latitude/longitude.
+    Performs speed validation to prevent cheating (teleports and excessive speeds).
+    Updates user progress statistics and publishes visit events to message queue.
+
+    Args:
+        body: Visit request containing latitude and longitude coordinates
+
+    Returns:
+        Visit response with success status, circle coordinates, and updated statistics.
+    """
     # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info("Visit request: lat=%s, lon=%s, user_id=%s",
@@ -373,7 +385,18 @@ async def visit_area(
 
 
 @router.get("/circles", response_model=models.CirclesResponse)
-async def list_circles(bbox: str, user=Depends(get_current_user)):
+async def list_circles(bbox: str = Query(..., description="Bounding box coordinates in format 'minLon,minLat,maxLon,maxLat'"), user=Depends(get_current_user)):
+    """Get user's visited circles within a bounding box.
+
+    Returns all H3 hexagons that the authenticated user has visited
+    and that intersect with the specified bounding box.
+
+    Args:
+        bbox: Bounding box coordinates in format "minLon,minLat,maxLon,maxLat"
+
+    Returns:
+        Response containing array of visited hexagon coordinates.
+    """
     # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info("Circles request: bbox=%s, user_id=%s", bbox, user_id)
@@ -412,6 +435,17 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
 
 @router.delete("/circle")
 async def delete_circle(body: models.DeleteCircleRequest, user=Depends(get_current_user)):
+    """Delete a visited circle.
+
+    Removes a visit record for a specific H3 hexagon for the authenticated user.
+    This is typically used for debugging or correcting erroneous visits.
+
+    Args:
+        body: Delete request containing the H3 geokey of the circle to remove
+
+    Returns:
+        Object with "deleted" field indicating whether the circle was successfully removed.
+    """
     user_id, _ = user
     conn = db_module.get_connection()
     deleted = db_module.delete_visit_by_hex(conn, user_id=user_id, h3_index=body.geokey)

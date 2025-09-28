@@ -167,6 +167,11 @@ async def debug_auth(body: models.AuthRequest, request: Request):
 
 @router.get("/me")
 async def debug_me(request: Request):
+    """Get current authenticated user information from session.
+
+    Returns user data stored in the current session for debugging purposes.
+    Only works when user is authenticated via session in debug mode.
+    """
     if not request.session.get("tg_authenticated"):
         raise HTTPException(status_code=403, detail="unauthorized")
     logger.info(f"/api/me cookie keys: {list(request.cookies.keys())}")
@@ -186,6 +191,11 @@ async def authenticate(user=Depends(get_current_user)) -> Dict[str, Any]:
 
 @router.get("/ping")
 async def ping():
+    """Health check endpoint.
+
+    Simple ping endpoint to verify that the API is running and responding.
+    Always returns {"ok": True} for successful requests.
+    """
     return {"ok": True}
 
 
@@ -204,6 +214,13 @@ async def debug_mode():
 # Dev utility: clear entire database (allowed only in debug/no-auth)
 @router.post("/v1/dev/clear-db")
 async def dev_clear_db():
+    """Clear all data from database (development utility).
+
+    Completely clears all visits and users from the database.
+    Only allowed when running in DEBUG_AUTH_MODE or NO_AUTH_MODE.
+
+    Returns the count of cleared circles (visits) and users.
+    """
     from services.monolith.main import DEBUG_AUTH_MODE, NO_AUTH_MODE
 
     if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):

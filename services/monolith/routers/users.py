@@ -1,6 +1,6 @@
 import logging
 from typing import List, Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 import psycopg2.extras
 
 from services.common import database as db_module
@@ -142,6 +142,14 @@ async def get_current_user(
 
 @router.get("/me/achievements", response_model=List[models.Achievement])
 async def get_my_achievements(user=Depends(get_current_user)):
+    """Get achievements for the authenticated user.
+
+    Returns all available achievements with unlock status for the current user.
+    Shows which achievements have been unlocked and when.
+
+    Returns:
+        List of achievements with their unlock status and timestamps.
+    """
     user_id, _ = user
     conn = db_module.get_connection()
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -163,7 +171,7 @@ async def get_my_achievements(user=Depends(get_current_user)):
 
 
 @router.get("/user/{user_id}", response_model=models.UserInfo)
-async def get_user(user_id: int):
+async def get_user(user_id: int = Path(..., description="Internal user ID to retrieve information for")):
     """Get user information by internal user ID"""
     conn = db_module.get_connection()
     user_data = db_module.get_user_by_id(conn, user_id)

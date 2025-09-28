@@ -174,6 +174,15 @@ async def get_stats_summary(
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
+    """Get comprehensive statistics summary for the authenticated user.
+
+    Returns overall progress across all districts, progress by okrug,
+    and the 3 districts with the lowest completion percentage.
+    Results are cached for performance.
+
+    Returns:
+        Statistics summary including total progress, okrug breakdown, and bottom districts.
+    """
     user_id, _ = user
 
     # Формируем уникальный ключ для кэша
@@ -266,6 +275,20 @@ async def get_leaderboard(
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
+    """Get leaderboard rankings for users.
+
+    Returns a leaderboard showing top users by progress percentage
+    for the specified time period and administrative level.
+    Results are cached for performance.
+
+    Args:
+        level: Aggregation level - "district" for individual districts or "okrug" for okrugs
+        period: Time period - "week" for weekly rankings or "season" for all-time
+        limit: Number of leaderboard entries to return (1-100)
+
+    Returns:
+        Leaderboard response with ranked users and their progress statistics.
+    """
     _ = user  # currently unused but validates auth
 
     # Формируем уникальный ключ для кэша
