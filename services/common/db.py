@@ -372,6 +372,37 @@ def select_district_parent(conn: psycopg2.extensions.connection, district_id: in
         return int(parent) if parent is not None else None
 
 
+def record_atomic_visit(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    now_ts: Optional[int] = None,
+) -> bool:
+    """
+    Record only the atomic visit without updating statistics.
+    This is the fast path for visit recording.
+    """
+    ts = int(now_ts if now_ts is not None else time.time())
+    lat, lon = h3.cell_to_latlng(h3_index)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_visits_atomic(user_id, h3, ts, geom)
+            VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            ON CONFLICT DO NOTHING
+            """,
+            (user_id, h3_index, ts, lon, lat),
+        )
+        added = cur.rowcount > 0
+        if not added:
+            conn.rollback()
+            return False
+
+    conn.commit()
+    return True
+
+
 def record_visit_and_increment_stats(
     conn: psycopg2.extensions.connection,
     *,

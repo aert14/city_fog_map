@@ -559,15 +559,14 @@ async def visit_area(
     district_id, coverage = district_row
     okrug_id = db_module.select_district_parent(conn, district_id)
 
-    added = db_module.record_visit_and_increment_stats(
+    # Быстрая запись только атомарного визита
+    added = db_module.record_atomic_visit(
         conn,
         user_id=user_id,
         h3_index=geokey,
-        district_id=district_id,
-        coverage=coverage,
-        okrug_id=okrug_id,
     )
 
+    # Получаем статистику (может быть с задержкой обновления)
     stats_dict = db_module.fetch_user_stats(
         conn,
         user_id=user_id,
@@ -589,7 +588,7 @@ async def visit_area(
         except Exception as e:
             logger.warning(f"Error invalidating Redis cache: {e}")
 
-    # Отправляем сообщение в RabbitMQ о визите
+    # Отправляем сообщение в RabbitMQ о визите сразу после успешной записи
     if added:  # Только если визит был добавлен (не повтор)
         try:
             current_timestamp = int(time.time())
