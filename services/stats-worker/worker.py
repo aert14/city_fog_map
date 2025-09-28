@@ -18,8 +18,8 @@ from pythonjsonlogger import jsonlogger
 
 import sys
 import os
-sys.path.append(os.path.dirname(__file__))
-import db as db_module
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # добавляем services в path
+from common import db as db_module
 import cache
 import tracing
 

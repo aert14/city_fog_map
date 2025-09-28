@@ -7,6 +7,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import h3
 
+logger = logging.getLogger(__name__)
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is not set")
@@ -155,24 +157,46 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
 
 
 def ensure_user(conn: psycopg2.extensions.connection, tg_id: int, username: Optional[str]) -> int:
+    """Ensure user exists, with retry logic for deadlock handling."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
+                row = cur.fetchone()
+                if row:
+                    user_id = int(row[0])
+                    if username:
+                        cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
+                        conn.commit()
+                    return user_id
+
+                cur.execute(
+                    "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
+                    (tg_id, username),
+                )
+                user_id = cur.fetchone()[0]
+                cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+                conn.commit()
+                return user_id
+        except psycopg2.errors.DeadlockDetected:
+            if attempt < max_retries - 1:
+                # Wait a bit and retry
+                import time
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                # Re-raise the exception if all retries failed
+                raise
+
+
+def get_user_by_id(conn: psycopg2.extensions.connection, user_id: int) -> Optional[Tuple[int, Optional[str]]]:
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE tg_id = %s", (tg_id,))
+        cur.execute("SELECT tg_id, username FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
         if row:
-            user_id = int(row[0])
-            if username:
-                cur.execute("UPDATE users SET username = %s WHERE id = %s", (username, user_id))
-                conn.commit()
-            return user_id
-
-        cur.execute(
-            "INSERT INTO users (tg_id, username) VALUES (%s, %s) RETURNING id",
-            (tg_id, username),
-        )
-        user_id = cur.fetchone()[0]
-        cur.execute("INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
-        conn.commit()
-        return user_id
+            return int(row[0]), row[1]
+        return None
 
 
 def insert_circle_if_new(
@@ -330,53 +354,6 @@ def select_district_parent(conn: psycopg2.extensions.connection, district_id: in
             return None
         parent = row[0]
         return int(parent) if parent is not None else None
-
-
-def update_visit_statistics(
-    conn: psycopg2.extensions.connection,
-    *,
-    user_id: int,
-    h3_index: str,
-    district_id: int,
-    coverage: float,
-    okrug_id: Optional[int],
-) -> bool:
-    """
-    Update visit statistics for an existing atomic visit.
-    Assumes the atomic visit is already recorded.
-    Returns True if statistics were successfully updated.
-    """
-    try:
-        with conn.cursor() as cur:
-            increment_cell = 1 if coverage >= PRIMARY_COVERAGE_THRESHOLD else 0
-
-            _update_statistic(
-                cur,
-                table="user_district_stats",
-                key_field="district_id",
-                user_id=user_id,
-                region_id=district_id,
-                increment_cell=increment_cell,
-                coverage=coverage,
-            )
-
-            if okrug_id is not None:
-                _update_statistic(
-                    cur,
-                    table="user_okrug_stats",
-                    key_field="okrug_id",
-                    user_id=user_id,
-                    region_id=okrug_id,
-                    increment_cell=increment_cell,
-                    coverage=coverage,
-                )
-
-        conn.commit()
-        return True
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Failed to update visit statistics: {e}")
-        return False
 
 
 def record_visit_and_increment_stats(
@@ -637,6 +614,39 @@ def select_user_hexes_in_bbox(
         if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
             hexagons.append(h3_index)
     return hexagons
+
+
+# TODO: Consider implementing aggregate_hexagons for future optimization
+# def aggregate_hexagons(all_user_hexes: List[str]) -> List[str]:
+#     """Aggregate hexagons to parent indices for network optimization.
+#
+#     Groups child hexagons into parent hexagons if all children of a parent are present.
+#     Returns a mixed set of hexagons at different resolutions.
+#     """
+#     if not all_user_hexes:
+#         return []
+#
+#     resolution_to_group_at = BASE_VISIT_RESOLUTION - 2
+#     parents = {}
+#
+#     for hex_id in all_user_hexes:
+#         parent = h3.cell_to_parent(hex_id, resolution_to_group_at)
+#         if parent not in parents:
+#             parents[parent] = set()
+#         parents[parent].add(hex_id)
+#
+#     final_hexes = set()
+#     for parent, children in parents.items():
+#         # Check if all children of this parent are present
+#         expected_children_count = h3.cell_to_children_size(parent, BASE_VISIT_RESOLUTION)
+#         if len(children) == expected_children_count:
+#             # All children are present, add parent instead
+#             final_hexes.add(parent)
+#         else:
+#             # Not all children, add them individually
+#             final_hexes.update(children)
+#
+#     return list(final_hexes)
 
 
 def delete_visit_by_hex(
@@ -940,3 +950,131 @@ def fetch_leaderboard(
         params = [PRIMARY_COVERAGE_THRESHOLD, since_ts, level, limit]
         cur.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_all_districts_with_user_progress(
+    conn: psycopg2.extensions.connection, user_id: int
+) -> List[Dict[str, Any]]:
+    """Fetch all districts and okrugs with user progress statistics."""
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # First, handle districts (level = 'district')
+        district_sql = """
+            SELECT
+                d.id,
+                d.level,
+                d.name_ru,
+                d.parent_id,
+                ST_AsGeoJSON(d.geom) as geom_geojson,
+                d.bbox_min_lon,
+                d.bbox_min_lat,
+                d.bbox_max_lon,
+                d.bbox_max_lat,
+                d.total_cells,
+                d.total_weight,
+                COALESCE(s.visited_cells, 0) AS user_visited_cells,
+                COALESCE(s.visited_weight, 0.0) AS user_visited_weight
+            FROM districts AS d
+            LEFT JOIN user_district_stats AS s ON s.district_id = d.id AND s.user_id = %s
+            WHERE d.level = 'district'
+            ORDER BY d.name_ru
+        """
+
+        # Handle okrugs (level = 'okrug') with aggregated stats from child districts
+        okrug_sql = """
+            SELECT
+                d.id,
+                d.level,
+                d.name_ru,
+                d.parent_id,
+                ST_AsGeoJSON(d.geom) as geom_geojson,
+                d.bbox_min_lon,
+                d.bbox_min_lat,
+                d.bbox_max_lon,
+                d.bbox_max_lat,
+                COALESCE(child_totals.total_cells, d.total_cells, 0) AS total_cells,
+                COALESCE(child_totals.total_weight, d.total_weight, 0.0) AS total_weight,
+                COALESCE(s.visited_cells, 0) AS user_visited_cells,
+                COALESCE(s.visited_weight, 0.0) AS user_visited_weight
+            FROM districts AS d
+            LEFT JOIN (
+                SELECT parent_id AS okrug_id,
+                       SUM(total_cells) AS total_cells,
+                       SUM(total_weight) AS total_weight
+                FROM districts
+                WHERE level = 'district'
+                GROUP BY parent_id
+            ) AS child_totals ON child_totals.okrug_id = d.id
+            LEFT JOIN (
+                SELECT
+                    child.parent_id AS okrug_id,
+                    COALESCE(SUM(uds.visited_cells), 0) AS visited_cells,
+                    COALESCE(SUM(uds.visited_weight), 0.0) AS visited_weight
+                FROM districts AS child
+                LEFT JOIN user_district_stats AS uds
+                    ON uds.district_id = child.id AND uds.user_id = %s
+                WHERE child.level = 'district' AND child.parent_id IS NOT NULL
+                GROUP BY child.parent_id
+            ) AS s ON s.okrug_id = d.id
+            WHERE d.level = 'okrug'
+            ORDER BY d.name_ru
+        """
+
+        # Execute both queries and combine results
+        results = []
+
+        # Districts
+        cur.execute(district_sql, (user_id,))
+        results.extend([dict(row) for row in cur.fetchall()])
+
+        # Okrugs
+        cur.execute(okrug_sql, (user_id,))
+        results.extend([dict(row) for row in cur.fetchall()])
+
+        return results
+
+
+def update_visit_statistics(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    district_id: int,
+    coverage: float,
+    okrug_id: Optional[int],
+) -> bool:
+    """
+    Update visit statistics for an existing atomic visit.
+    Assumes the atomic visit is already recorded.
+    Returns True if statistics were successfully updated.
+    """
+    try:
+        with conn.cursor() as cur:
+            increment_cell = 1 if coverage >= PRIMARY_COVERAGE_THRESHOLD else 0
+
+            _update_statistic(
+                cur,
+                table="user_district_stats",
+                key_field="district_id",
+                user_id=user_id,
+                region_id=district_id,
+                increment_cell=increment_cell,
+                coverage=coverage,
+            )
+
+            if okrug_id is not None:
+                _update_statistic(
+                    cur,
+                    table="user_okrug_stats",
+                    key_field="okrug_id",
+                    user_id=user_id,
+                    region_id=okrug_id,
+                    increment_cell=increment_cell,
+                    coverage=coverage,
+                )
+
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to update visit statistics: {e}")
+        return False
