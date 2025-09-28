@@ -67,7 +67,7 @@
   const map = new maplibregl.Map({
     container: "map",
     style:
-      "https://api.maptiler.com/maps/pastel/style.json?key=TFV5uV6DVVucu16gTZdi",
+      "https://api.maptiler.com/maps/01999189-4baa-7e39-a599-8526afdd67ae/style.json?key=APpVE6JSa2fSgJJvdPyv",
     center: [37.6173, 55.7558],
     zoom: 12,
     maxBounds: [
