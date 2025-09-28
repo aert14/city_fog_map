@@ -20,6 +20,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as db_module
 from . import cache
+from .cache import check_rate_limit, increment_rate_limit
 from redis.asyncio import Redis
 
 
@@ -541,6 +542,15 @@ async def visit_area(
     # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
+
+    # Проверяем rate limit только если не в debug режиме
+    if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        if not await check_rate_limit(user_id, limit=20):
+            logger.warning(f"Rate limit exceeded for user {user_id}")
+            raise HTTPException(status_code=429, detail="Too Many Requests")
+
+        # Увеличиваем счетчик запросов
+        await increment_rate_limit(user_id, window_seconds=60)
 
     conn = db_module.get_connection()
 

@@ -246,6 +246,29 @@ class MonolithAPITestCase(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["added"], 0)  # Should be 0 for duplicate
 
+    @patch('services.monolith.main.db_module.select_district_for_cell')
+    @patch('services.monolith.main.db_module.fetch_user_stats')
+    def test_visit_area_rate_limit_graceful_degradation(self, mock_fetch_stats, mock_select_district):
+        """Test rate limiter graceful degradation when Redis is unavailable"""
+        # Mock database calls
+        mock_select_district.return_value = (100, 0.8)
+        mock_fetch_stats.return_value = {
+            "total_circles": 1,
+            "district": {"id": 100, "visited_cells": 1, "visited_weight": 0.8},
+            "okrug": None
+        }
+
+        # Test that multiple requests succeed when Redis is not available
+        # (graceful degradation - rate limiting is disabled)
+        for i in range(25):  # More than the 20 request limit
+            response = self.client.post(
+                "/api/v1/visit",
+                json={"lat": 55.7558, "lon": 37.6176},
+                headers={"X-User-Tg-Id": "123", "X-User-Username": "testuser"}
+            )
+            self.assertEqual(response.status_code, 200,
+                           f"Request {i+1} should succeed with graceful degradation")
+
 
 class TelegramAuthTestCase(unittest.TestCase):
     """Test cases for Telegram authentication verification"""
