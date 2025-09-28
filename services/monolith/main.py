@@ -336,6 +336,12 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 City Fog Map API starting up...")
 
+    # Check for production environment with debug flags
+    app_env = os.getenv("APP_ENV", "").lower()
+    if app_env == "production" and (DEBUG_AUTH_MODE or NO_AUTH_MODE):
+        logger.error("FATAL: Cannot start in production environment with debug flags enabled")
+        raise RuntimeError("Cannot start in production environment with DEBUG_AUTH_MODE or NO_AUTH_MODE enabled")
+
     # Initialize Redis
     await cache.init_redis_pool()
 
