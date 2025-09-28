@@ -3,7 +3,6 @@ import time
 import logging
 from typing import Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
 import h3
 from redis.asyncio import Redis
 
@@ -11,7 +10,6 @@ from services.common import database as db_module
 from common import models
 import cache
 import queue
-import tracing
 
 # Configure JSON logging
 logger = logging.getLogger(__name__)
@@ -19,7 +17,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["visits"])
 
 
-def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+def calculate_distance(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
     """
     Вычисляет расстояние между двумя точками на Земле в километрах.
     Использует формулу Haversine.
@@ -45,7 +45,8 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     dlon = lon2_rad - lon1_rad
 
     # Формула Haversine
-    a = math.sin(dlat / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2
+    a = (math.sin(dlat / 2)**2 +
+         math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     distance = R * c
@@ -79,17 +80,21 @@ def _progress_from_counts(
     )
 
 
-def _get_user_from_session(request: Request) -> Optional[Tuple[int, Optional[str]]]:
+def _get_user_from_session(
+    request: Request
+) -> Optional[Tuple[int, Optional[str]]]:
     if request.session.get("tg_authenticated") and request.session.get("tg_user_id"):
         try:
             tg_id = int(request.session["tg_user_id"])
             tg_user = request.session.get("tg_user", {})
-            username = tg_user.get("username") if isinstance(tg_user, dict) else None
+            username = (tg_user.get("username")
+                        if isinstance(tg_user, dict) else None)
 
             conn = db_module.get_connection()
             user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
             logger.info(
-                "User authenticated via session: user_id=%s, tg_id=%s, username=%s",
+                "User authenticated via session: user_id=%s, tg_id=%s, "
+                "username=%s",
                 user_id,
                 tg_id,
                 username,
@@ -106,11 +111,17 @@ def _get_user_from_header(telegram_init: str) -> Tuple[int, Optional[str]]:
 
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set")
-        raise HTTPException(status_code=500, detail="Server misconfigured: TELEGRAM_BOT_TOKEN not set")
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfigured: TELEGRAM_BOT_TOKEN not set"
+        )
 
     result = _verify_init_data(telegram_init, TELEGRAM_BOT_TOKEN)
     if not result.get("ok"):
-        raise HTTPException(status_code=401, detail=result.get("reason", "bad initData"))
+        raise HTTPException(
+            status_code=401,
+            detail=result.get("reason", "bad initData")
+        )
 
     payload = result["payload"]
     user_raw = payload.get("user")
@@ -122,13 +133,14 @@ def _get_user_from_header(telegram_init: str) -> Tuple[int, Optional[str]]:
         user_obj = json.loads(user_raw)
         tg_id = int(user_obj["id"])
         username = user_obj.get("username")
-    except (json.JSONDecodeError, KeyError, ValueError):
-        raise HTTPException(status_code=401, detail="bad user json")
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="bad user json") from exc
 
     conn = db_module.get_connection()
     user_id = db_module.ensure_user(conn, tg_id=tg_id, username=username)
     logger.info(
-        "User authenticated via header: user_id=%s, tg_id=%s, username=%s",
+        "User authenticated via header: user_id=%s, tg_id=%s, "
+        "username=%s",
         user_id,
         tg_id,
         username,
@@ -142,7 +154,7 @@ def _verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 864
     import hmac
     import hashlib
 
-    logger.info(f"Verifying initData: {len(raw_init_data)} chars")
+    logger.info("Verifying initData: %s chars", len(raw_init_data))
     data = dict(urllib.parse.parse_qsl(raw_init_data, keep_blank_values=True))
     recv_hash = data.pop("hash", None)
     if not recv_hash:
@@ -155,7 +167,8 @@ def _verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 864
     exp_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(exp_hash, recv_hash):
-        logger.warning(f"Hash mismatch: expected {exp_hash[:16]}..., got {recv_hash[:16]}...")
+        logger.warning("Hash mismatch: expected %s..., got %s...",
+                       exp_hash[:16], recv_hash[:16])
         return {"ok": False, "reason": "hash mismatch"}
 
     try:
@@ -163,17 +176,18 @@ def _verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 864
         from datetime import timezone, timedelta
         auth_ts = int(data.get("auth_date", "0"))
     except ValueError:
-        logger.warning(f"Invalid auth_date format: {data.get('auth_date')}")
+        logger.warning("Invalid auth_date format: %s", data.get('auth_date'))
         return {"ok": False, "reason": "bad auth_date"}
     if auth_ts <= 0:
-        logger.warning(f"Empty auth_date: {auth_ts}")
+        logger.warning("Empty auth_date: %s", auth_ts)
         return {"ok": False, "reason": "empty auth_date"}
     if datetime.datetime.now(timezone.utc) - datetime.datetime.fromtimestamp(auth_ts, tz=timezone.utc) > timedelta(seconds=max_age_sec):
-        logger.warning(f"Stale auth_date: {auth_ts}")
+        logger.warning("Stale auth_date: %s", auth_ts)
         return {"ok": False, "reason": "stale auth_date"}
 
     # Do not parse user JSON here to avoid side effects; just log payload keys
-    logger.info(f"InitData verified successfully; payload keys: {sorted(list(data.keys()))}")
+    logger.info("InitData verified successfully; payload keys: %s",
+                sorted(list(data.keys())))
     return {"ok": True, "payload": data}
 
 
@@ -214,7 +228,8 @@ async def visit_area(
 ):
     # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
-    logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
+    logger.info("Visit request: lat=%s, lon=%s, user_id=%s",
+                body.lat, body.lon, user_id)
 
     # Проверка скорости и телепортов
     if redis_client:
@@ -237,19 +252,22 @@ async def visit_area(
                     distance_km = calculate_distance(last_lat, last_lon, body.lat, body.lon)
                     speed_kmh = (distance_km / time_diff_seconds) * 3600  # км/ч
 
-                    logger.info(f"Speed check: distance={distance_km:.3f}km, time_diff={time_diff_seconds:.1f}s, speed={speed_kmh:.1f}km/h")
+                    logger.info("Speed check: distance=%.3fkm, time_diff=%.1fs, speed=%.1fkm/h",
+                                distance_km, time_diff_seconds, speed_kmh)
 
                     # Проверка условий: (дистанция > 2 км и время < 10 сек) ИЛИ скорость > 150 км/ч
                     if distance_km > 2.0 and time_diff_seconds < 10.0:
-                        logger.warning(f"Visit rejected: teleport detected (distance={distance_km:.3f}km in {time_diff_seconds:.1f}s) for user {user_id}")
+                        logger.warning("Visit rejected: teleport detected (distance=%.3fkm in %.1fs) for user %s",
+                                       distance_km, time_diff_seconds, user_id)
                         raise HTTPException(status_code=400, detail="Visit rejected: teleport detected")
 
                     if speed_kmh > 150.0:
-                        logger.warning(f"Visit rejected: excessive speed {speed_kmh:.1f} km/h for user {user_id}")
+                        logger.warning("Visit rejected: excessive speed %.1f km/h for user %s",
+                                       speed_kmh, user_id)
                         raise HTTPException(status_code=400, detail="Visit rejected: excessive speed detected")
 
-        except Exception as e:
-            logger.error(f"Error during speed check for user {user_id}: {e}")
+        except (ValueError, AttributeError, UnicodeDecodeError) as e:
+            logger.error("Error during speed check for user %s: %s", user_id, e)
             # В случае ошибки проверки скорости разрешаем визит, но логируем ошибку
 
     conn = db_module.get_connection()
@@ -260,7 +278,7 @@ async def visit_area(
 
     district_row = db_module.select_district_for_cell(conn, geokey)
     if not district_row:
-        logger.info(f"Visit ignored: no district for geokey={geokey}")
+        logger.info("Visit ignored: no district for geokey=%s", geokey)
         stats_dict = db_module.fetch_user_stats(conn, user_id=user_id, district_id=None, okrug_id=None)
         stats = models.VisitStats(
             total_circles=stats_dict["total_circles"],
@@ -273,9 +291,9 @@ async def visit_area(
             try:
                 cache_key = f"user:{user_id}:stats_summary"
                 await redis_client.delete(cache_key)
-                logger.info(f"Invalidated cache for user {user_id} stats summary")
-            except Exception as e:
-                logger.warning(f"Error invalidating Redis cache: {e}")
+                logger.info("Invalidated cache for user %s stats summary", user_id)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning("Error invalidating Redis cache: %s", e)
 
         return models.VisitResponse(
             added=0,
@@ -300,10 +318,12 @@ async def visit_area(
         district_id=district_id,
         okrug_id=okrug_id,
     )
+    district_stats = stats_dict.get("district")
+    okrug_stats = stats_dict.get("okrug")
     stats = models.VisitStats(
         total_circles=stats_dict["total_circles"],
-        district=models.RegionStats(**stats_dict["district"]) if stats_dict.get("district") else None,
-        okrug=models.RegionStats(**stats_dict["okrug"]) if stats_dict.get("okrug") else None,
+        district=models.RegionStats(**district_stats) if district_stats else None,
+        okrug=models.RegionStats(**okrug_stats) if okrug_stats else None,
     )
 
     # Инвалидируем кэш статистики пользователя
@@ -311,9 +331,9 @@ async def visit_area(
         try:
             cache_key = f"user:{user_id}:stats_summary"
             await redis_client.delete(cache_key)
-            logger.info(f"Invalidated cache for user {user_id} stats summary")
-        except Exception as e:
-            logger.warning(f"Error invalidating Redis cache: {e}")
+            logger.info("Invalidated cache for user %s stats summary", user_id)
+        except (ConnectionError, TimeoutError) as e:
+            logger.warning("Error invalidating Redis cache: %s", e)
 
     # Отправляем сообщение в RabbitMQ о визите сразу после успешной записи
     if added:  # Только если визит был добавлен (не повтор)
@@ -326,8 +346,8 @@ async def visit_area(
                 lon=lon,
                 timestamp=current_timestamp
             )
-        except Exception as e:
-            logger.error(f"Error publishing visit message to RabbitMQ for user {user_id}: {e}")
+        except (ConnectionError, TimeoutError, OSError) as e:
+            logger.error("Error publishing visit message to RabbitMQ for user %s: %s", user_id, e)
             # Не прерываем обработку визита из-за ошибки RabbitMQ
 
     # Обновляем данные последнего визита в Redis
@@ -337,12 +357,13 @@ async def visit_area(
             current_timestamp = time.time()
             visit_data = f"{current_timestamp},{lat},{lon}"
             await redis_client.set(last_visit_key, visit_data)
-            logger.info(f"Updated last visit data for user {user_id}: {visit_data}")
-        except Exception as e:
-            logger.error(f"Error updating last visit data in Redis for user {user_id}: {e}")
+            logger.info("Updated last visit data for user %s: %s", user_id, visit_data)
+        except (ConnectionError, TimeoutError) as e:
+            logger.error("Error updating last visit data in Redis for user %s: %s", user_id, e)
 
     logger.info(
-        f"Visit processed: added={added}, district_id={district_id}, okrug_id={okrug_id}, geokey={geokey}, coverage={coverage:.3f}"
+        "Visit processed: added=%s, district_id=%s, okrug_id=%s, geokey=%s, coverage=%.3f",
+        added, district_id, okrug_id, geokey, coverage
     )
     return models.VisitResponse(
         added=1 if added else 0,
@@ -355,23 +376,24 @@ async def visit_area(
 async def list_circles(bbox: str, user=Depends(get_current_user)):
     # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
-    logger.info(f"Circles request: bbox={bbox}, user_id={user_id}")
+    logger.info("Circles request: bbox=%s, user_id=%s", bbox, user_id)
 
     try:
         min_lon_str, min_lat_str, max_lon_str, max_lat_str = bbox.split(",")
         min_lon, min_lat = float(min_lon_str), float(min_lat_str)
         max_lon, max_lat = float(max_lon_str), float(max_lat_str)
     except Exception as e:
-        logger.error(f"Invalid bbox format: {bbox}, error: {e}")
-        raise HTTPException(status_code=400, detail="bad bbox")
+        logger.error("Invalid bbox format: %s, error: %s", bbox, e)
+        raise HTTPException(status_code=400, detail="bad bbox") from e
 
-    logger.info(f"Parsed bbox: min_lon={min_lon}, min_lat={min_lat}, max_lon={max_lon}, max_lat={max_lat}")
+    logger.info("Parsed bbox: min_lon=%s, min_lat=%s, max_lon=%s, max_lat=%s",
+                min_lon, min_lat, max_lon, max_lat)
 
     conn = db_module.get_connection()
 
     # Debug: get all user hexagons first
     all_user_hexagons = db_module.select_user_hexes(conn, user_id)
-    logger.info(f"User {user_id} has {len(all_user_hexagons)} total hexagons")
+    logger.info("User %s has %s total hexagons", user_id, len(all_user_hexagons))
 
     hexagons = db_module.select_user_hexes_in_bbox(
         conn,
@@ -382,9 +404,9 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
         max_lon=max_lon,
     )
 
-    logger.info(f"Circles response: {len(hexagons)} hexagons returned in bbox")
+    logger.info("Circles response: %s hexagons returned in bbox", len(hexagons))
     if len(hexagons) > 0:
-        logger.info(f"Sample hexagons: {hexagons[:3]}")
+        logger.info("Sample hexagons: %s", hexagons[:3])
     return models.CirclesResponse(hexagons=hexagons)
 
 
