@@ -2241,6 +2241,178 @@ async def get_leaderboard(
 
 
 
+services/monolith/queue.py:
+import os
+import json
+import logging
+from typing import Optional
+import pika
+from pika.adapters.asyncio_connection import AsyncioConnection
+from pika.channel import Channel
+import asyncio
+
+logger = logging.getLogger(__name__)
+
+# Глобальные переменные для соединения с RabbitMQ
+rabbit_connection: Optional[AsyncioConnection] = None
+rabbit_channel: Optional[Channel] = None
+rabbit_queue_name = "visits_queue"
+
+
+async def init_rabbitmq_connection() -> None:
+    """Инициализирует соединение с RabbitMQ"""
+    global rabbit_connection, rabbit_channel
+
+    rabbitmq_url = os.getenv("RABBITMQ_URL")
+    if not rabbitmq_url:
+        logger.warning(
+            "RABBITMQ_URL not set, RabbitMQ integration will be disabled"
+        )
+        return
+
+    try:
+        # Парсим URL для получения параметров соединения
+        parameters = pika.URLParameters(rabbitmq_url)
+
+        # Создаем асинхронное соединение
+        loop = asyncio.get_event_loop()
+        rabbit_connection = AsyncioConnection(
+            parameters=parameters,
+            on_open_callback=on_connection_open,
+            on_open_error_callback=on_connection_open_error,
+            on_close_callback=on_connection_closed,
+            custom_ioloop=loop
+        )
+
+        logger.info("RabbitMQ connection initialization started")
+
+    except Exception as e:
+        logger.error(f"Failed to initialize RabbitMQ connection: {e}")
+        rabbit_connection = None
+
+
+def on_connection_open(connection: AsyncioConnection) -> None:
+    """Callback при успешном открытии соединения"""
+    global rabbit_channel
+    logger.info("RabbitMQ connection opened")
+    connection.channel(on_open_callback=on_channel_open)
+
+
+def on_connection_open_error(connection: AsyncioConnection, error: Exception) -> None:
+    """Callback при ошибке открытия соединения"""
+    logger.error(f"RabbitMQ connection open error: {error}")
+    global rabbit_connection
+    rabbit_connection = None
+
+
+def on_connection_closed(connection: AsyncioConnection, reason: Exception) -> None:
+    """Callback при закрытии соединения"""
+    logger.info(f"RabbitMQ connection closed: {reason}")
+    global rabbit_connection, rabbit_channel
+    rabbit_connection = None
+    rabbit_channel = None
+
+
+def on_channel_open(channel: Channel) -> None:
+    """Callback при успешном открытии канала"""
+    global rabbit_channel
+    logger.info("RabbitMQ channel opened")
+    rabbit_channel = channel
+    # Объявляем очередь
+    channel.queue_declare(
+        queue=rabbit_queue_name,
+        durable=True,
+        callback=on_queue_declare_ok
+    )
+
+
+def on_queue_declare_ok(method_frame) -> None:
+    """Callback при успешном объявлении очереди"""
+    logger.info(f"RabbitMQ queue '{rabbit_queue_name}' declared successfully")
+
+
+async def close_rabbitmq_connection() -> None:
+    """Закрывает соединение с RabbitMQ"""
+    global rabbit_connection, rabbit_channel
+
+    if rabbit_channel:
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, rabbit_channel.close)
+            logger.info("RabbitMQ channel closed")
+        except Exception as e:
+            logger.error(f"Error closing RabbitMQ channel: {e}")
+        finally:
+            rabbit_channel = None
+
+    if rabbit_connection:
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, rabbit_connection.close)
+            logger.info("RabbitMQ connection closed")
+        except Exception as e:
+            logger.error(f"Error closing RabbitMQ connection: {e}")
+        finally:
+            rabbit_connection = None
+
+
+async def publish_visit_message(
+    user_id: int,
+    h3_geokey: str,
+    lat: float,
+    lon: float,
+    timestamp: int
+) -> bool:
+    """
+    Публикует сообщение о визите в очередь RabbitMQ
+
+    Args:
+        user_id: ID пользователя
+        h3_geokey: H3 геоключ
+        lat: Широта
+        lon: Долгота
+        timestamp: Временная метка Unix
+
+    Returns:
+        True если сообщение опубликовано успешно, False в противном случае
+    """
+    global rabbit_channel
+
+    if not rabbit_channel:
+        logger.warning("RabbitMQ channel not available, skipping message publish")
+        return False
+
+    try:
+        message = {
+            "user_id": user_id,
+            "h3_geokey": h3_geokey,
+            "lat": lat,
+            "lon": lon,
+            "timestamp": timestamp
+        }
+
+        message_json = json.dumps(message, ensure_ascii=False)
+
+        # Публикуем сообщение в очередь
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: rabbit_channel.basic_publish(
+                exchange='',
+                routing_key=rabbit_queue_name,
+                body=message_json.encode('utf-8'),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # persistent
+                    content_type='application/json'
+                )
+            )
+        )
+
+        logger.info(f"Published visit message for user {user_id} at ({lat}, {lon})")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to publish visit message: {e}")
+        return False
+
+
 services/monolith/tracing.py:
 import os
 from opentelemetry import trace
@@ -2293,6 +2465,7 @@ opentelemetry-api>=1.20.0
 opentelemetry-sdk>=1.20.0
 opentelemetry-exporter-otlp>=1.20.0
 opentelemetry-instrumentation-fastapi>=0.41b0
+pika>=1.3.0
 
 
 
@@ -2468,6 +2641,7 @@ from common import models
 import cache
 from redis.asyncio import Redis
 import tracing
+import queue
 
 
 # Configure JSON logging
@@ -2786,6 +2960,9 @@ async def lifespan(app: FastAPI):
     # Initialize Redis
     await cache.init_redis_pool()
 
+    # Initialize RabbitMQ
+    await queue.init_rabbitmq_connection()
+
     # Initialize database
     logger.info("Database initialization...")
     conn = db_module.get_connection()
@@ -2799,6 +2976,9 @@ async def lifespan(app: FastAPI):
 
     # Close Redis connection
     await cache.close_redis_pool()
+
+    # Close RabbitMQ connection
+    await queue.close_rabbitmq_connection()
 
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
@@ -2993,15 +3173,14 @@ async def visit_area(
     district_id, coverage = district_row
     okrug_id = db_module.select_district_parent(conn, district_id)
 
-    added = db_module.record_visit_and_increment_stats(
+    # Быстрая запись только атомарного визита
+    added = db_module.record_atomic_visit(
         conn,
         user_id=user_id,
         h3_index=geokey,
-        district_id=district_id,
-        coverage=coverage,
-        okrug_id=okrug_id,
     )
 
+    # Получаем статистику (может быть с задержкой обновления)
     stats_dict = db_module.fetch_user_stats(
         conn,
         user_id=user_id,
@@ -3022,6 +3201,21 @@ async def visit_area(
             logger.info(f"Invalidated cache for user {user_id} stats summary")
         except Exception as e:
             logger.warning(f"Error invalidating Redis cache: {e}")
+
+    # Отправляем сообщение в RabbitMQ о визите сразу после успешной записи
+    if added:  # Только если визит был добавлен (не повтор)
+        try:
+            current_timestamp = int(time.time())
+            await queue.publish_visit_message(
+                user_id=user_id,
+                h3_geokey=geokey,
+                lat=lat,
+                lon=lon,
+                timestamp=current_timestamp
+            )
+        except Exception as e:
+            logger.error(f"Error publishing visit message to RabbitMQ for user {user_id}: {e}")
+            # Не прерываем обработку визита из-за ошибки RabbitMQ
 
     # Обновляем данные последнего визита в Redis
     if redis_client:
@@ -4372,6 +4566,37 @@ def select_district_parent(conn: psycopg2.extensions.connection, district_id: in
             return None
         parent = row[0]
         return int(parent) if parent is not None else None
+
+
+def record_atomic_visit(
+    conn: psycopg2.extensions.connection,
+    *,
+    user_id: int,
+    h3_index: str,
+    now_ts: Optional[int] = None,
+) -> bool:
+    """
+    Record only the atomic visit without updating statistics.
+    This is the fast path for visit recording.
+    """
+    ts = int(now_ts if now_ts is not None else time.time())
+    lat, lon = h3.cell_to_latlng(h3_index)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_visits_atomic(user_id, h3, ts, geom)
+            VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            ON CONFLICT DO NOTHING
+            """,
+            (user_id, h3_index, ts, lon, lat),
+        )
+        added = cur.rowcount > 0
+        if not added:
+            conn.rollback()
+            return False
+
+    conn.commit()
+    return True
 
 
 def record_visit_and_increment_stats(
@@ -6415,7 +6640,7 @@ webapp/app.js:
   const map = new maplibregl.Map({
     container: "map",
     style:
-      "https://api.maptiler.com/maps/pastel/style.json?key=TFV5uV6DVVucu16gTZdi",
+      "https://api.maptiler.com/maps/01999189-4baa-7e39-a599-8526afdd67ae/style.json?key=APpVE6JSa2fSgJJvdPyv",
     center: [37.6173, 55.7558],
     zoom: 12,
     maxBounds: [

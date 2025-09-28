@@ -41,8 +41,8 @@
   }
 
   // --- UI & Config ---
-  const openBtn = document.getElementById("openBtn");
-  const leaderboardBtn = document.getElementById("leaderboardBtn");
+  const openBtn = document.getElementById("hud-explore-btn");
+  const leaderboardBtn = document.getElementById("hud-leaderboard-btn");
   const leaderboardOverlay = document.getElementById("leaderboard-overlay");
   const leaderboardCloseBtn = document.getElementById("leaderboardCloseBtn");
   const leaderboardLevelSelect = document.getElementById("leaderboardLevel");
@@ -50,8 +50,7 @@
   const leaderboardStatus = document.getElementById("leaderboardStatus");
   const leaderboardBody = document.getElementById("leaderboardBody");
   const toggleFogBtn = document.getElementById("toggleFogBtn");
-  const countEl = document.getElementById("count");
-  const statusEl = document.getElementById("status");
+  const countEl = document.getElementById("hud-count");
   const fogCanvas = document.getElementById("fog-canvas");
   const fogCtx = fogCanvas.getContext("2d");
   const DPR = window.devicePixelRatio || 1;
@@ -111,11 +110,9 @@
   let selectedDistrictFeature = null;
   let selectedDistrictAbortController = null;
   let selectedDistrictResView = null;
-  const DEFAULT_STATUS_TEXT = "Select a district";
   const districtFeatureMap = new Map();
   const okrugFeatureMap = new Map();
   const districtCellsCache = new Map();
-  let statusOverrideMessage = null;
 
   // --- NEW: Spatial Index for Hexagons ---
   const spatialIndex = new Map();
@@ -812,10 +809,7 @@
           } else {
             clearDistrictSelection();
             updateDistrictHexLayer(emptyFeatureCollection);
-            if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
           }
-        } else if (!statusOverrideMessage) {
-          setStatus(DEFAULT_STATUS_TEXT);
         }
       })
       .catch((error) => {
@@ -920,10 +914,7 @@
           } else {
             clearDistrictSelection();
             updateDistrictHexLayer(emptyFeatureCollection);
-            if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
           }
-        } else if (!statusOverrideMessage) {
-          setStatus(DEFAULT_STATUS_TEXT);
         }
       })
       .catch((error) => {
@@ -961,14 +952,12 @@
 
   function updateStatusForSelection() {
     if (!selectedDistrictId || !selectedDistrictFeature) {
-      if (!statusOverrideMessage) setStatus(DEFAULT_STATUS_TEXT);
       return;
     }
     const suffix = formatProgressSuffix(selectedDistrictFeature);
     const label = suffix
       ? `${selectedDistrictName} • ${suffix}`
       : selectedDistrictName;
-    setStatus(label || DEFAULT_STATUS_TEXT);
   }
 
   function handleDistrictSelection(feature) {
@@ -1063,7 +1052,6 @@
     if (selectedDistrictAbortController) {
       selectedDistrictAbortController.abort();
     }
-    setStatus(`Loading ${selectedDistrictName}…`, { temporary: true });
     const controller = new AbortController();
     selectedDistrictAbortController = controller;
 
@@ -1095,12 +1083,6 @@
       .catch((error) => {
         if (controller.signal.aborted) return;
         console.warn("[district] Failed to fetch district cells", error);
-        if (selectedDistrictId === districtId) {
-          setStatus("Failed to load district cells", {
-            temporary: true,
-            state: "error",
-          });
-        }
       })
       .finally(() => {
         if (selectedDistrictAbortController === controller) {
@@ -1183,14 +1165,6 @@
     return { payload, resValue, cacheKey, featureCollection };
   }
 
-  function setStatus(message, opts = {}) {
-    statusOverrideMessage = opts.temporary ? message : null;
-    if (!statusEl) return;
-    statusEl.textContent = message || DEFAULT_STATUS_TEXT;
-    statusEl.dataset.state = opts.state || "";
-  }
-
-  setStatus(DEFAULT_STATUS_TEXT);
 
   if (noAuthMode || debugAuthMode) {
     toggleFogBtn.style.display = "inline-block";
@@ -1509,22 +1483,22 @@
   let lastKnownPosition = null;
   const TARGET_GEO_ZOOM = 17;
   openBtn.disabled = true;
-  openBtn.textContent = "Locating...";
+  openBtn.querySelector('span').textContent = "Поиск...";
 
   geolocate.on("geolocate", (pos) => {
     lastKnownPosition = pos.coords;
     const zoom = Math.max(map.getZoom(), TARGET_GEO_ZOOM);
     map.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom });
     openBtn.disabled = false;
-    openBtn.textContent = "Explore 50m Around";
+    openBtn.querySelector('span').textContent = "Исследовать";
   });
 
   geolocate.on("error", () => {
     if (noAuthMode) {
-      openBtn.textContent = "Click map to add points";
+      openBtn.querySelector('span').textContent = "Кликните по карте для добавления точек";
       openBtn.disabled = false;
     } else {
-      openBtn.textContent = "Geolocation failed";
+      openBtn.querySelector('span').textContent = "Ошибка геолокации";
     }
   });
 
