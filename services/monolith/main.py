@@ -6,6 +6,7 @@ import urllib.parse
 import logging
 import sys
 import time
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from contextlib import asynccontextmanager
@@ -58,6 +59,39 @@ if not TELEGRAM_BOT_TOKEN:
 DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "0") == "1"
 # No-auth local mode: bypass Telegram auth and use a fixed local user
 NO_AUTH_MODE = os.getenv("NO_AUTH_MODE", "0") == "1"
+
+
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Вычисляет расстояние между двумя точками на Земле в километрах.
+    Использует формулу Haversine.
+
+    Args:
+        lat1, lon1: Координаты первой точки
+        lat2, lon2: Координаты второй точки
+
+    Returns:
+        Расстояние в километрах
+    """
+    # Радиус Земли в километрах
+    R = 6371.0
+
+    # Преобразование в радианы
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+
+    # Разницы координат
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+
+    # Формула Haversine
+    a = math.sin(dlat / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    distance = R * c
+    return distance
 
 
 def verify_init_data(raw_init_data: str, bot_token: str, max_age_sec: int = 86400) -> Dict:
@@ -442,6 +476,42 @@ async def visit_area(
     user_id, _ = user
     logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
 
+    # Проверка скорости и телепортов
+    if redis_client:
+        try:
+            last_visit_key = f"user:{user_id}:last_visit"
+            last_visit_data = await redis_client.get(last_visit_key)
+
+            if last_visit_data:
+                # Парсим данные последнего визита: timestamp,lat,lon
+                last_visit_str = last_visit_data.decode('utf-8')
+                last_timestamp_str, last_lat_str, last_lon_str = last_visit_str.split(',')
+                last_timestamp = float(last_timestamp_str)
+                last_lat = float(last_lat_str)
+                last_lon = float(last_lon_str)
+
+                current_timestamp = time.time()
+                time_diff_seconds = current_timestamp - last_timestamp
+
+                if time_diff_seconds > 0:  # Избегаем деления на ноль
+                    distance_km = calculate_distance(last_lat, last_lon, body.lat, body.lon)
+                    speed_kmh = (distance_km / time_diff_seconds) * 3600  # км/ч
+
+                    logger.info(f"Speed check: distance={distance_km:.3f}km, time_diff={time_diff_seconds:.1f}s, speed={speed_kmh:.1f}km/h")
+
+                    # Проверка условий: (дистанция > 2 км и время < 10 сек) ИЛИ скорость > 150 км/ч
+                    if distance_km > 2.0 and time_diff_seconds < 10.0:
+                        logger.warning(f"Visit rejected: teleport detected (distance={distance_km:.3f}km in {time_diff_seconds:.1f}s) for user {user_id}")
+                        raise HTTPException(status_code=400, detail="Visit rejected: teleport detected")
+
+                    if speed_kmh > 150.0:
+                        logger.warning(f"Visit rejected: excessive speed {speed_kmh:.1f} km/h for user {user_id}")
+                        raise HTTPException(status_code=400, detail="Visit rejected: excessive speed detected")
+
+        except Exception as e:
+            logger.error(f"Error during speed check for user {user_id}: {e}")
+            # В случае ошибки проверки скорости разрешаем визит, но логируем ошибку
+
     conn = db_module.get_connection()
 
     lat, lon = float(body.lat), float(body.lon)
@@ -505,6 +575,17 @@ async def visit_area(
             logger.info(f"Invalidated cache for user {user_id} stats summary")
         except Exception as e:
             logger.warning(f"Error invalidating Redis cache: {e}")
+
+    # Обновляем данные последнего визита в Redis
+    if redis_client:
+        try:
+            last_visit_key = f"user:{user_id}:last_visit"
+            current_timestamp = time.time()
+            visit_data = f"{current_timestamp},{lat},{lon}"
+            await redis_client.set(last_visit_key, visit_data)
+            logger.info(f"Updated last visit data for user {user_id}: {visit_data}")
+        except Exception as e:
+            logger.error(f"Error updating last visit data in Redis for user {user_id}: {e}")
 
     logger.info(
         f"Visit processed: added={added}, district_id={district_id}, okrug_id={okrug_id}, geokey={geokey}, coverage={coverage:.3f}"
