@@ -7,6 +7,11 @@
     } catch (_) {}
   }
 
+  // Check if onboarding has been completed
+  if (!localStorage.getItem('onboardingCompleted')) {
+    startOnboarding();
+  }
+
   async function getDebugSettings() {
     try {
       const response = await fetch("/api/v1/debug-mode");
@@ -1777,5 +1782,59 @@
       console.error('Achievement fetch error:', error);
       achievementsList.innerHTML = '<p style="color: #f87171;">Не удалось загрузить достижения.</p>';
     }
+  }
+
+  function startOnboarding() {
+    const steps = [
+      {
+        title: "Добро пожаловать!",
+        text: "Это City Fog Map, игра, где вы исследуете реальный мир и открываете его на карте, рассеивая 'туман войны'."
+      },
+      {
+        title: "Как исследовать?",
+        text: "Перемещайтесь по городу, и когда будете готовы, нажмите большую кнопку 'Исследовать' внизу, чтобы открыть территорию вокруг вас."
+      },
+      {
+        title: "Следите за прогрессом",
+        text: "Кликайте на районы на карте, чтобы увидеть свой прогресс и соревнуйтесь с другими игроками в таблице лидеров. Удачи!"
+      }
+    ];
+
+    let currentStep = 0;
+    const overlay = document.getElementById('onboarding-overlay');
+    const titleEl = document.getElementById('onboarding-title');
+    const textEl = document.getElementById('onboarding-text');
+    const skipBtn = document.getElementById('onboarding-skip-btn');
+    const nextBtn = document.getElementById('onboarding-next-btn');
+
+    function showStep(stepIndex) {
+      const step = steps[stepIndex];
+      titleEl.textContent = step.title;
+      textEl.textContent = step.text;
+      if (stepIndex === steps.length - 1) {
+        nextBtn.textContent = "Начать игру!";
+      } else {
+        nextBtn.textContent = "Далее";
+      }
+      overlay.style.display = 'flex';
+    }
+
+    function finishOnboarding() {
+      overlay.style.display = 'none';
+      localStorage.setItem('onboardingCompleted', 'true');
+    }
+
+    nextBtn.addEventListener('click', () => {
+      currentStep++;
+      if (currentStep < steps.length) {
+        showStep(currentStep);
+      } else {
+        finishOnboarding();
+      }
+    });
+
+    skipBtn.addEventListener('click', finishOnboarding);
+
+    showStep(0);
   }
 })();

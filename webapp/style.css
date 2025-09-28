@@ -405,3 +405,35 @@ body {
     align-items: stretch;
   }
 }
+
+/* Onboarding modal styles */
+.onboarding-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 10, 16, 0.7);
+    backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+}
+.onboarding-modal {
+    background: #1f2937;
+    padding: 24px;
+    border-radius: 16px;
+    max-width: 320px;
+    text-align: center;
+    border: 1px solid #4b5563;
+}
+.onboarding-modal h3 {
+    margin-top: 0;
+}
+.onboarding-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 20px;
+}
+#onboarding-skip-btn {
+    background: #4b5563;
+}
