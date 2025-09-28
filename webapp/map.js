@@ -1,6 +1,6 @@
 // Map module - handles MapLibre map initialization and all map-related functionality
 import { state, updateDistrictProgress, toFeatureCollection, cloneFeature, formatProgressSuffix, safeRound, addToSpatialIndex } from './state.js';
-import { updateHexagonsFromServer, fetchDistrictCellsRaw } from './api.js';
+import { updateHexagonsFromServer, fetchDistrictCellsRaw, getAuthHeaders } from './api.js';
 
 let map = null;
 const geolocate = null;
@@ -345,7 +345,7 @@ export function loadAllDistricts() {
 
   fetch(`/api/v1/districts/all`, {
     signal: controller.signal,
-    headers: { Accept: "application/json" }, // getAuthHeaders will be called from api module
+    headers: getAuthHeaders({ Accept: "application/json" }),
   })
     .then(async (response) => {
       if (controller.signal.aborted) return;
@@ -434,7 +434,7 @@ export function refreshAdminLayers() {
   // This will need to be updated to use proper auth headers from api module
   const requestOptions = {
     signal: controller.signal,
-    headers: { Accept: "application/json" },
+    headers: getAuthHeaders({ Accept: "application/json" }),
   };
 
   const okrugPromise = fetch(
@@ -771,7 +771,7 @@ async function revealDistrictViaVisits(cells, { addToSpatialIndex, updateDistric
     try {
       const response = await fetch("/api/v1/visit", {
         method: "POST",
-        headers: { "Content-Type": "application/json" }, // getAuthHeaders will be called from api module
+        headers: getAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ lat, lon: lng }),
       });
 

@@ -109,7 +109,7 @@ export function initializeUI({ map, addVisitAt, deleteHexAtPoint, revealEntireDi
           await revealEntireDistrict(state.selectedDistrictId, uiParams);
         } catch (err) {
           console.warn("[debug] reveal district failed", err);
-          alert("Failed to reveal district");
+          alert("Failed to reveal district: " + err.message);
         } finally {
           revealDistrictBtn.disabled = false;
           revealDistrictBtn.textContent = "Reveal District";
