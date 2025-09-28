@@ -373,19 +373,7 @@ instrumentator = Instrumentator()
 instrumentator.instrument(app)
 instrumentator.expose(app)
 
-# Static frontend at /webapp
-webapp_dir = "/webapp"
-if not os.path.isdir(webapp_dir):
-    os.makedirs(webapp_dir, exist_ok=True)
-class LongCacheStatic(StaticFiles):
-    async def get_response(self, path: str, scope):  # type: ignore[override]
-        response = await super().get_response(path, scope)
-        # Index handled separately; here set long cache for assets
-        if response.status_code == 200 and response.media_type != "text/html":
-            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
-        return response
-
-app.mount("/webapp", LongCacheStatic(directory=webapp_dir, html=True), name="webapp")
+# Static frontend will be mounted at the end after all routes
 
 # Version for cache-busting static assets
 APP_VERSION = os.getenv("APP_VERSION")
@@ -401,8 +389,7 @@ def _read_index_with_version() -> str:
     try:
         with open(index_path, "r", encoding="utf-8") as f:
             html = f.read()
-        # inject version to app.js, style.css, and fog.js
-        html = html.replace("/webapp/app.js", f"/webapp/app.js?v={APP_VERSION}")
+        # inject version to style.css and fog.js (but not app.js since it's handled differently for modules)
         html = html.replace("/webapp/style.css", f"/webapp/style.css?v={APP_VERSION}")
         html = html.replace("/webapp/fog.js", f"/webapp/fog.js?v={APP_VERSION}")
         return html
@@ -463,9 +450,10 @@ async def log_requests(request: Request, call_next):
 async def webapp_index() -> Response:
     html = _read_index_with_version()
     injection = f'<script>window.__CITY_FOG_BASE_RESOLUTION__ = {db_module.BASE_VISIT_RESOLUTION};</script>'
-    marker = '<script src="/webapp/app.js"></script>'
+    marker = '<script type="module" src="/webapp/app.js"></script>'
+    versioned_marker = f'<script type="module" src="/webapp/app.js?v={APP_VERSION}"></script>'
     if marker in html:
-        html = html.replace(marker, f"{injection}\n    {marker}")
+        html = html.replace(marker, f"{injection}\n    {versioned_marker}")
     else:
         html = f"{html}\n{injection}"
     headers = {"Cache-Control": "no-store"}
@@ -1192,5 +1180,21 @@ async def get_my_achievements(user=Depends(get_current_user)):
         )
         rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+
+# Static frontend at /webapp (mounted after all routes to allow route overrides)
+webapp_dir = "/webapp"
+if not os.path.isdir(webapp_dir):
+    os.makedirs(webapp_dir, exist_ok=True)
+
+class LongCacheStatic(StaticFiles):
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        # Index handled separately; here set long cache for assets
+        if response.status_code == 200 and response.media_type != "text/html":
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        return response
+
+app.mount("/webapp", LongCacheStatic(directory=webapp_dir, html=True), name="webapp")
 
 
