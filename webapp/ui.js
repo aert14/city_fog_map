@@ -6,6 +6,8 @@ let deleteMode = false;
 let selectionEnabled = true;
 
 export function initializeUI({ map, addVisitAt, deleteHexAtPoint, revealEntireDistrict, updateHexagonsFromServer, allKnownHexagons, addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw }) {
+  // Store parameters for use in event handlers
+  const uiParams = { updateHexagonsFromServer, addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons };
   // Get UI elements
   const openBtn = document.getElementById("hud-explore-btn");
   const leaderboardBtn = document.getElementById("hud-leaderboard-btn");
@@ -104,7 +106,7 @@ export function initializeUI({ map, addVisitAt, deleteHexAtPoint, revealEntireDi
         revealDistrictBtn.disabled = true;
         revealDistrictBtn.textContent = "Revealing…";
         try {
-          await revealEntireDistrict(state.selectedDistrictId, { updateHexagonsFromServer });
+          await revealEntireDistrict(state.selectedDistrictId, uiParams);
         } catch (err) {
           console.warn("[debug] reveal district failed", err);
           alert("Failed to reveal district");

@@ -719,7 +719,7 @@ function fetchDistrictCells(districtId, resView = null) {
     });
 }
 
-export async function revealEntireDistrict(districtId, { updateHexagonsFromServer }) {
+export async function revealEntireDistrict(districtId, { updateHexagonsFromServer, addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons }) {
   // Always fetch cells with the server's base resolution to get all cells
   const serverBaseResolution = window.__CITY_FOG_BASE_RESOLUTION__ || 10;
   const detailed = await fetchDistrictCellsRaw(
@@ -733,20 +733,19 @@ export async function revealEntireDistrict(districtId, { updateHexagonsFromServe
 
   const revealCells = meta.cells;
 
-  await revealDistrictViaVisits(revealCells, { updateHexagonsFromServer });
+  await revealDistrictViaVisits(revealCells, {
+    addToSpatialIndex,
+    updateDistrictProgress,
+    countEl,
+    forceFogRedraw,
+    allKnownHexagons
+  });
 
   // Refresh the display after revealing
   const areaKm2 = getFeatureAreaKm2(state.selectedDistrictFeature);
   const desiredRes = pickResByArea(areaKm2);
   await Promise.all([
-    updateHexagonsFromServer({
-      map,
-      allKnownHexagons: state.allKnownHexagons,
-      addToSpatialIndex,
-      countEl: document.getElementById("hud-count"),
-      forceFogRedraw: () => {},
-      loader: document.getElementById("loader")
-    }),
+    updateHexagonsFromServer(),
     fetchDistrictCells(districtId, desiredRes),
   ]);
   // Note: District layers are now loaded statically and don't need refresh
