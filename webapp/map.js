@@ -752,6 +752,7 @@ export async function revealEntireDistrict(districtId, { updateHexagonsFromServe
 }
 
 async function revealDistrictViaVisits(cells, { addToSpatialIndex, updateDistrictProgress, countEl, forceFogRedraw, allKnownHexagons }) {
+  // Note: map is available in module scope
   if (!Array.isArray(cells) || cells.length === 0) return;
   let hasChanges = false;
   for (let i = 0; i < cells.length; i++) {
@@ -794,6 +795,6 @@ async function revealDistrictViaVisits(cells, { addToSpatialIndex, updateDistric
   }
   if (hasChanges) {
     forceFogRedraw();
-    map.triggerRepaint();
+    if (map) map.triggerRepaint();
   }
 }
