@@ -70,7 +70,7 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 Запустите все сервисы с помощью Docker Compose:
 
 ```bash
-docker-compose up --build -d
+docker compose up --build -d
 ```
 
 ### 4. Импорт геоданных (Обязательный шаг!)
@@ -81,10 +81,10 @@ docker-compose up --build -d
 
 ```bash
 # 1. Импортируем геометрию районов и округов в PostgreSQL
-docker-compose exec monolith python tools/import_data_to_postgres.py
+docker compose exec monolith python tools/import_data_to_postgres.py
 
 # 2. Рассчитываем и сохраняем H3-ячейки для каждого района (может занять несколько минут)
-docker-compose exec monolith python tools/build_district_cells.py
+docker compose exec monolith python tools/build_district_cells.py
 ```
 
 После выполнения этих шагов приложение полностью готово к работе.
@@ -103,7 +103,7 @@ docker-compose exec monolith python tools/build_district_cells.py
 Для запуска автоматических тестов используйте следующую команду:
 
 ```bash
-docker-compose exec monolith pytest
+docker compose exec monolith pytest
 ```
 
 ## 📜 Лицензия

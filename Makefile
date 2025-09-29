@@ -7,7 +7,7 @@ PROJECT_ROOT := /Users/aaivanov/city_fog_map
 
 help:
 	@echo "Targets:"
-	@echo "  up             - start all services with docker-compose"
+	@echo "  up             - start all services with docker compose"
 	@echo "  down           - stop all services"
 	@echo "  build          - rebuild all services"
 	@echo "  logs           - show logs from all services"
@@ -20,20 +20,20 @@ help:
 
 up:
 	@echo "Starting all services..."
-	cd $(PROJECT_ROOT); docker-compose up -d
+	cd $(PROJECT_ROOT); docker compose up -d
 	@echo "Services started. Web app available at http://localhost"
 	@echo "RabbitMQ Management: http://localhost:15672 (guest/guest)"
 
 down:
 	@echo "Stopping all services..."
-	cd $(PROJECT_ROOT); docker-compose down
+	cd $(PROJECT_ROOT); docker compose down
 
 build:
 	@echo "Building all services..."
-	cd $(PROJECT_ROOT); docker-compose build --no-cache
+	cd $(PROJECT_ROOT); docker compose build --no-cache
 
 logs:
-	cd $(PROJECT_ROOT); docker-compose logs -f
+	cd $(PROJECT_ROOT); docker compose logs -f
 
 tunnel:
 	@pkill -f "localtunnel.*--port 80" || true
@@ -73,6 +73,6 @@ kill:
 
 clean:
 	@echo "Removing all containers and volumes..."
-	cd $(PROJECT_ROOT); docker-compose down -v --remove-orphans
+	cd $(PROJECT_ROOT); docker compose down -v --remove-orphans
 	@echo "All containers and volumes removed."
 
