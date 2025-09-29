@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Copy webapp directory from project root
-COPY ../../webapp /webapp
+COPY webapp /webapp
 
 # Expose the port the app runs on
 EXPOSE 8000
