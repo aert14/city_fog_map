@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 # Absolute project root
-PROJECT_ROOT := /Users/aaivanov/city_fog_map
+PROJECT_ROOT := /home/aert14/city_fog_map
 
 .PHONY: help up down build logs tunnel tunnel-status password kill clean tunnel-cf tunnel-cf-logs tunnel-cf-kill
 
@@ -33,7 +33,7 @@ down:
 
 build:
 	@echo "Building all services..."
-	cd $(PROJECT_ROOT); docker-compose build --no-cache
+	cd $(PROJECT_ROOT); docker-compose build --no-cache --remove-orphans
 
 logs:
 	cd $(PROJECT_ROOT); docker-compose logs -f

@@ -5,6 +5,7 @@ services:
       dockerfile: ./services/monolith/Dockerfile
     volumes:
       - ./services:/app/services:ro
+      - ./tools:/app/tools:ro
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
