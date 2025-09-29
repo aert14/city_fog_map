@@ -39,14 +39,14 @@
 -   **База данных:** PostgreSQL, PostGIS
 -   **Кэш:** Redis
 -   **Очередь сообщений:** RabbitMQ
--   **Инфраструктура:** Docker, docker-compose, Nginx
+-   **Инфраструктура:** Docker, docker compose, Nginx
 -   **Наблюдаемость:** OpenTelemetry, Prometheus, Grafana, Loki, Tempo
 
 ## 💻 Локальный запуск
 
 ### 1. Предварительные требования
 
--   Установленные **Docker** и **docker-compose**.
+-   Установленные **Docker** и **docker compose**.
 -   **Токен Telegram-бота**. Его можно получить у [@BotFather](https://t.me/BotFather).
 
 ### 2. Конфигурация
@@ -67,10 +67,10 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 
 ### 3. Запуск
 
-Запустите все сервисы с помощью docker-compose:
+Запустите все сервисы с помощью docker compose:
 
 ```bash
-docker-compose up --build -d
+docker compose up --build -d
 ```
 
 ### 4. Импорт геоданных (Обязательный шаг!)
@@ -81,10 +81,10 @@ docker-compose up --build -d
 
 ```bash
 # 1. Импортируем геометрию районов и округов в PostgreSQL
-docker-compose exec monolith python tools/import_data_to_postgres.py
+docker compose exec monolith python tools/import_data_to_postgres.py
 
 # 2. Рассчитываем и сохраняем H3-ячейки для каждого района (может занять несколько минут)
-docker-compose exec monolith python tools/build_district_cells.py
+docker compose exec monolith python tools/build_district_cells.py
 ```
 
 После выполнения этих шагов приложение полностью готово к работе.
@@ -103,7 +103,7 @@ docker-compose exec monolith python tools/build_district_cells.py
 Для запуска автоматических тестов используйте следующую команду:
 
 ```bash
-docker-compose exec monolith pytest
+docker compose exec monolith pytest
 ```
 
 ## 📜 Лицензия

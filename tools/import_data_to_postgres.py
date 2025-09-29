@@ -21,7 +21,7 @@ from shapely.geometry import Polygon, shape
 from shapely.geometry.base import BaseGeometry
 
 # Добавляем корневую директорию проекта в путь, чтобы найти модуль services
-# Это необходимо для запуска скрипта из docker-compose exec
+# Это необходимо для запуска скрипта из docker compose exec
 sys.path.append('/app')
 
 from services.common.database import get_connection

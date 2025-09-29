@@ -456,7 +456,11 @@ async def webapp_index() -> Response:
         html = html.replace(marker, f"{injection}\n    {versioned_marker}")
     else:
         html = f"{html}\n{injection}"
-    headers = {"Cache-Control": "no-store"}
+    headers = {
+        "Cache-Control": "no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0"
+    }
     return Response(content=html, media_type="text/html; charset=utf-8", headers=headers)
 
 

@@ -13,18 +13,18 @@ echo "🔄 Запускаем процесс создания валидного
 while true; do
   echo "-----------------------------------------------------"
   echo "1. Принудительно останавливаем и удаляем старый туннель (если существует)..."
-  docker-compose stop $SERVICE_NAME > /dev/null 2>&1 || true
-  docker-compose rm -f $SERVICE_NAME > /dev/null 2>&1 || true
+  docker compose stop $SERVICE_NAME > /dev/null 2>&1 || true
+  docker compose rm -f $SERVICE_NAME > /dev/null 2>&1 || true
 
   echo "2. Запрашиваем новый туннель (пересоздаем контейнер)..."
   # `up -d` с флагом --force-recreate гарантирует создание нового инстанса
-  docker-compose up -d --force-recreate $SERVICE_NAME
+  docker compose up -d --force-recreate $SERVICE_NAME
 
   echo "3. Ожидаем 7 секунд, пока туннель установит соединение..."
   sleep 7
 
   echo "4. Извлекаем URL из логов..."
-  URL=$(docker-compose logs $SERVICE_NAME | grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' | head -n 1)
+  URL=$(docker compose logs $SERVICE_NAME | grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' | head -n 1)
 
   if [ -z "$URL" ]; then
     echo "❌ Не удалось получить URL из логов. Повторяем попытку..."
