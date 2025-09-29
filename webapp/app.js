@@ -11,6 +11,8 @@ import { addVisitAt, deleteHexAtPoint, updateHexagonsFromServer } from './api.js
   if (tg) {
     try {
       tg.ready();
+      // Make Telegram WebApp available globally for API calls
+      window.tg = tg;
     } catch (_) {}
   }
 
