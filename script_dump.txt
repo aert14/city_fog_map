@@ -1,3 +1,120 @@
+PROJECT STRUCTURE:
+/
+├── common/
+│   └── models.py
+├── data/
+│   ├── moscow_districts.geojson
+│   └── moscow_okrugs.geojson
+├── migrations/
+│   ├── 001_districts.sql
+│   ├── 002_district_cells.sql
+│   ├── 003_visits.sql
+│   └── 004_geom_index.sql
+├── services/
+│   ├── common/
+│   │   ├── database/
+│   │   │   ├── __init__.py
+│   │   │   ├── connection.py
+│   │   │   ├── queries_districts.py
+│   │   │   ├── queries_stats.py
+│   │   │   ├── queries_users.py
+│   │   │   └── queries_visits.py
+│   │   ├── __init__.py
+│   │   └── models.py
+│   ├── monolith/
+│   │   ├── routers/
+│   │   │   ├── __init__.py
+│   │   │   ├── debug.py
+│   │   │   ├── districts.py
+│   │   │   ├── stats.py
+│   │   │   ├── users.py
+│   │   │   └── visits.py
+│   │   ├── __init__.py
+│   │   ├── cache.py
+│   │   ├── Dockerfile
+│   │   ├── main.py
+│   │   ├── queue.py
+│   │   ├── requirements.txt
+│   │   └── tracing.py
+│   ├── stats-worker/
+│   │   ├── cache.py
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt
+│   │   ├── tracing.py
+│   │   └── worker.py
+│   └── __init__.py
+├── tests/
+│   ├── test_database_extended.py
+│   ├── test_db.py
+│   ├── test_error_handling.py
+│   ├── test_geo_service_api.py
+│   ├── test_integration.py
+│   ├── test_monolith_api.py
+│   ├── test_startup_protection.py
+│   ├── test_user_service_api.py
+│   ├── test_visit_service_api.py
+│   └── test_visits.py
+├── tools/
+│   ├── build_district_cells.py
+│   ├── check-and-restart-tunnel.sh
+│   ├── dump_files.py
+│   ├── fetch_moscow_boundaries.py
+│   ├── import_data_to_postgres.py
+│   ├── monitor-tunnel.sh
+│   ├── README-tunnel-monitor.md
+│   ├── run-cf-tunnel.sh
+│   ├── send-tunnel-url.py
+│   └── test-tunnel-system.sh
+├── webapp/
+│   ├── api.js
+│   ├── app.js
+│   ├── debug-auth.html
+│   ├── fog.js
+│   ├── image.png
+│   ├── index.html
+│   ├── map.js
+│   ├── state.js
+│   ├── style.css
+│   ├── texture.worker.js
+│   └── ui.js
+├── __init__.py
+├── cache.py
+├── docker-compose.yml
+├── Dockerfile
+├── LICENSE
+├── main.py
+├── Makefile
+├── nginx.conf
+├── otel-collector-config.yml
+├── prometheus.yml
+├── promtail-config.yml
+├── rabbitmq_queue.py
+├── README.md
+├── requirements.txt
+├── script_dump.txt
+├── tempo.yml
+├── test.html
+├── test_distance.py
+├── test_geom_optimization.py
+├── test_import.py
+├── test_map.html
+├── test_map_final.html
+├── test_models.py
+├── test_modules.html
+├── test_monolith_import.py
+├── test_performance.py
+├── test_rabbitmq_integration.py
+├── test_rate_limiter.py
+├── test_reveal_district.html
+├── test_reveal_function.js
+├── test_speed_logic.py
+├── test_user_migration.py
+├── test_visit_rate_limit.py
+├── tracing.py
+└── tunnel-monitor.log
+
+==================================================
+
 services/__init__.py:
 # Services package
 
