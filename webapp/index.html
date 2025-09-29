@@ -20,6 +20,17 @@
     <div id="app">
       <div id="toolbar">
         <!-- Пользовательские элементы удалены -->
+        <div id="mapControlsPanel">
+          <button id="zoomInBtn" class="btn map-control-btn" title="Приблизить">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button id="zoomOutBtn" class="btn map-control-btn" title="Отдалить">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>
+          </button>
+          <button id="geolocateBtn" class="btn map-control-btn" title="Определить гео и приблизить">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0-10 10c0 4.42 3.58 8 8 8s8-3.58 8-8a10 10 0 0 0-10-10z"/><path d="M12 12l4-4"/></svg>
+          </button>
+        </div>
         <div id="debugPanel" style="display: none">
           <!-- Кнопка "Fog" перенесена сюда -->
           <button id="toggleFogBtn" class="btn">Hide Fog</button>

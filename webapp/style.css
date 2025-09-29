@@ -136,6 +136,30 @@ body {
   }
 }
 
+#mapControlsPanel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto; /* Кнопки кликабельные */
+}
+
+.map-control-btn {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 16px;
+  min-width: auto;
+}
+
+.map-control-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
 #debugPanel {
   margin-left: auto; /* Сдвигает панель вправо */
   display: flex;

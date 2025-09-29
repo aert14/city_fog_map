@@ -29,11 +29,17 @@ export function initializeUI({ map, addVisitAt, deleteHexAtPoint, revealEntireDi
   const selectionToggleBtn = document.getElementById("selectionToggleBtn");
   const revealDistrictBtn = document.getElementById("revealDistrictBtn");
 
+  // Map control elements
+  const zoomInBtn = document.getElementById("zoomInBtn");
+  const zoomOutBtn = document.getElementById("zoomOutBtn");
+  const geolocateBtn = document.getElementById("geolocateBtn");
+
   // Setup event listeners
   setupLeaderboardUI();
   setupProfileUI();
   setupDebugUI();
   setupMainButtons();
+  setupMapControls();
 
   function setupLeaderboardUI() {
     if (leaderboardBtn) {
@@ -148,6 +154,36 @@ export function initializeUI({ map, addVisitAt, deleteHexAtPoint, revealEntireDi
         state.fogEnabled = !state.fogEnabled;
         toggleFogBtn.textContent = state.fogEnabled ? "Hide Fog" : "Show Fog";
         map.triggerRepaint();
+      });
+    }
+  }
+
+  function setupMapControls() {
+    if (zoomInBtn) {
+      zoomInBtn.addEventListener("click", () => {
+        if (map) {
+          map.zoomIn();
+        }
+      });
+    }
+
+    if (zoomOutBtn) {
+      zoomOutBtn.addEventListener("click", () => {
+        if (map) {
+          map.zoomOut();
+        }
+      });
+    }
+
+    if (geolocateBtn) {
+      geolocateBtn.addEventListener("click", () => {
+        if (map) {
+          // Find the geolocate control and trigger it
+          const geolocateControl = map._controls.find(control => control instanceof maplibregl.GeolocateControl);
+          if (geolocateControl) {
+            geolocateControl.trigger();
+          }
+        }
       });
     }
   }
