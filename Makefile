@@ -3,7 +3,7 @@ SHELL := /bin/bash
 # Absolute project root
 PROJECT_ROOT := /Users/aaivanov/city_fog_map
 
-.PHONY: help up down build logs tunnel tunnel-status password kill clean
+.PHONY: help up down build logs tunnel tunnel-status password kill clean tunnel-cf tunnel-cf-logs tunnel-cf-kill
 
 help:
 	@echo "Targets:"
@@ -16,6 +16,9 @@ help:
 	@echo "  tunnel-status  - check tunnel status and get URL"
 	@echo "  password       - print LocalTunnel password (public IP)"
 	@echo "  kill           - stop tunnel and clean temporary files"
+	@echo "  tunnel-cf      - run Cloudflare tunnel using smart script"
+	@echo "  tunnel-cf-logs - show Cloudflare tunnel logs (Ctrl+C to exit)"
+	@echo "  tunnel-cf-kill - stop Cloudflare tunnel"
 	@echo "  clean          - remove all containers and volumes"
 
 up:
@@ -75,4 +78,17 @@ clean:
 	@echo "Removing all containers and volumes..."
 	cd $(PROJECT_ROOT); docker compose down -v --remove-orphans
 	@echo "All containers and volumes removed."
+
+tunnel-cf:
+	@echo "Запуск управляющего скрипта для Cloudflare туннеля..."
+	@./tools/run-cf-tunnel.sh
+
+tunnel-cf-logs:
+	@echo "Просмотр логов туннеля Cloudflare (нажмите Ctrl+C для выхода)..."
+	@docker compose logs -f cloudflared
+
+tunnel-cf-kill:
+	@echo "Остановка туннеля Cloudflare..."
+	@docker compose stop cloudflared
+	@echo "Туннель остановлен."
 

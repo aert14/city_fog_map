@@ -8,8 +8,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/gis
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      # - NO_AUTH_MODE=1
-      - APP_ENV=production
+      - NO_AUTH_MODE=1
+      - APP_ENV=dev
       - REDIS_URL=redis://redis:6379/0
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
@@ -94,8 +94,9 @@ services:
       - POSTGRES_USER=user
       - POSTGRES_PASSWORD=password
       - POSTGRES_DB=gis
-    ports:
-      - "5432:5432"
+    # Port not exposed to prevent external access
+    # ports:
+    #   - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -142,6 +143,16 @@ services:
         condition: service_started
       rabbitmq:
         condition: service_started
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared-tunnel
+    restart: unless-stopped
+    command: tunnel --url http://monolith:8000
+    depends_on:
+      - monolith
+    networks:
+      - default
 
 volumes:
   postgres_data:
