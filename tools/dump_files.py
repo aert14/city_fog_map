@@ -43,5 +43,27 @@ def dump_files_to_script_dump(directories):
 
 if __name__ == "__main__":
     directories_to_dump = ['app', 'services', 'webapp']
+    files_to_dump = ['Makefile']  # Add specific files to dump
+
+    # Dump directories
     dump_files_to_script_dump(directories_to_dump)
+
+    # Dump specific files
+    output_lines = []
+    for file_path in files_to_dump:
+        if os.path.exists(file_path) and not is_binary_file(file_path):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    output_lines.append(f"{file_path}:")
+                    output_lines.append(content)
+                    output_lines.append("")  # Empty line between files
+            except Exception as e:
+                print(f"Error reading {file_path}: {e}", file=sys.stderr)
+
+    # Append specific files to script_dump.txt
+    if output_lines:
+        with open('script_dump.txt', 'a', encoding='utf-8') as f:
+            f.write('\n'.join(output_lines))
+
     print("Files dumped to script_dump.txt")
