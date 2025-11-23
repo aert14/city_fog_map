@@ -1,136 +1,95 @@
 # City Fog Map
 
-City Fog Map is a Telegram Mini App that allows users to "unfog" a map by exploring their surroundings. It's built with FastAPI on the backend and a vanilla JavaScript frontend using MapLibre GL.
+**City Fog Map** is an interactive "Fog of War" exploration game for Telegram. As you move through the real world, the fog on the map clears, revealing the city around you.
 
-## Features
+![City Fog Map Demo](https://github.com/user-attachments/assets/placeholder-image.png)
 
-*   **Telegram Mini App Integration:** Authenticates users securely via their Telegram client.
-*   **Interactive Map:** Uses MapLibre GL to display an interactive map.
-*   **"Fog of War" Effect:** Unexplored areas are covered in a "fog of war" that users can clear by visiting locations.
-*   **Geospatial Indexing:** Uses H3 for efficient storage and retrieval of explored areas.
-*   **Debug Mode:** Includes a debug mode for easy development and testing.
+## 🎮 Demo
 
-## Architecture
+Try the **Demo Mode** directly in your browser (no Telegram required):
+[**Launch Demo**](https://your-username.github.io/city-fog-map/webapp/)
 
-The application is built with a microservices architecture using Docker containers:
+*Note: The demo runs entirely in your browser using local storage. No backend connection is required.*
 
-1.  **Backend Services:** Multiple Python-based services powered by FastAPI:
-    - **monolith:** Main web service serving static files and API endpoints
-    - **geo-service:** Handles geospatial operations and H3 indexing
-    - **user-service:** Manages user authentication and sessions
-    - **visit-service:** Processes visit events via RabbitMQ message queue
-    - **stats-worker:** Background worker for statistics processing
+## ✨ Features
 
-2.  **Frontend:** A vanilla JavaScript single-page application that runs as a Telegram Mini App. It uses MapLibre GL for rendering the map and interacts with the backend via REST APIs.
+*   **Fog of War:** The world is initially hidden. Explore to uncover it.
+*   **Geospatial Indexing:** Efficiently tracks visited areas using H3 hexagonal grids.
+*   **Telegram Integration:** Seamlessly integrates with Telegram Mini Apps for authentication and location services.
+*   **Interactive Map:** Built with MapLibre GL for smooth, vector-based mapping.
+*   **Demo Mode:** A standalone static version for easy testing and showcasing.
 
-3.  **Infrastructure:**
-    - **PostgreSQL with PostGIS:** Database for geospatial data
-    - **Redis:** Caching and session storage
-    - **RabbitMQ:** Message queue for async processing
-    - **Nginx:** Reverse proxy and load balancer
+## 🏗️ Architecture
 
-The application uses Docker Compose for easy deployment and localtunnel for exposing the local development environment to the internet.
+The project consists of a microservices backend and a static frontend:
 
-## Getting Started
+*   **Frontend:** Vanilla JavaScript + MapLibre GL (located in `webapp/`).
+*   **Backend:** Python FastAPI services (Monolith, Geo, User, Visit, Stats).
+*   **Database:** PostgreSQL with PostGIS for geospatial data.
+*   **Infrastructure:** Docker Compose, Redis, RabbitMQ, Nginx.
+
+## 🚀 Getting Started
 
 ### Prerequisites
 
-*   Docker and Docker Compose
-*   A Telegram Bot Token (get one from [@BotFather](https://t.me/BotFather))
-*   Node.js with npm (for localtunnel, if not using Docker)
+*   Docker & Docker Compose
+*   A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
 
-### Installation
+### Local Development (Full App)
 
 1.  **Clone the repository:**
-
     ```bash
     git clone https://github.com/your-username/city-fog-map.git
     cd city-fog-map
     ```
 
-### Running the Application
-
-1.  **Set the Telegram Bot Token:**
-
+2.  **Set your Bot Token:**
     ```bash
-    export TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+    export TELEGRAM_BOT_TOKEN="YOUR_TOKEN_HERE"
     ```
 
-2.  **Start all services with Docker Compose:**
-
+3.  **Start Services:**
     ```bash
     make up
     ```
+    This launches the full stack (DB, Backend, Frontend) via Docker Compose.
 
-    This will start all services including PostgreSQL, Redis, RabbitMQ, and the application services.
-
-3.  **Check that services are running:**
-
-    ```bash
-    make logs
-    ```
-
-4.  **Expose your local server to the internet:**
-
+4.  **Expose to Internet:**
+    To test the Telegram Web App, you need a public URL (HTTPS).
     ```bash
     make tunnel
     ```
+    Use the provided URL to configure your Telegram Bot's Menu Button.
 
-    This uses localtunnel to expose port 80 to the internet. Check the tunnel status:
+### Frontend Development (Demo Mode)
 
-    ```bash
-    make tunnel-status
-    ```
+To work on the frontend without the backend:
 
-    Localtunnel will give you a public HTTPS URL (e.g., `https://aert0.loca.lt`).
+1.  Open `webapp/index.html` in your browser.
+2.  The app will automatically detect it's running locally and switch to **Demo Mode**.
+3.  Changes to `webapp/` files are reflected immediately on refresh.
 
-5.  **Configure your Telegram Bot:**
+## 📦 Deployment
 
-    *   Talk to [@BotFather](https://t.me/BotFather) on Telegram.
-    *   Use the `/setdomain` command to link your bot to the tunnel URL.
-    *   Create a menu button for your bot with the URL pointing to your web app (e.g., `https://aert0.loca.lt/webapp/`).
+### GitHub Pages (Frontend Only)
 
-### Available Make Commands
+The frontend is designed to be deployable to GitHub Pages.
+A GitHub Actions workflow is included in `.github/workflows/deploy.yml` to automatically deploy the `webapp/` directory on push to `main`.
 
-*   `make up` - Start all services
-*   `make down` - Stop all services
-*   `make build` - Rebuild all services
-*   `make logs` - Show logs from all services
-*   `make tunnel` - Start localtunnel to expose port 80
-*   `make tunnel-status` - Check tunnel status and get URL
-*   `make kill` - Stop tunnel and clean up
-*   `make clean` - Remove all containers and volumes
+### Full Stack
 
-## API Endpoints
+For a full deployment, you will need a server with Docker support (e.g., VPS, DigitalOcean, AWS).
+1.  Copy `docker-compose.yml` and `Makefile` to your server.
+2.  Set environment variables (`TELEGRAM_BOT_TOKEN`, `DATABASE_URL`, etc.).
+3.  Run `make up`.
 
-The backend exposes the following API endpoints:
+## 🛠️ Tech Stack
 
-*   `POST /api/v1/visit`: Records a user's visit to a specific location.
-    *   **Body:** `{ "lat": float, "lon": float }`
-    *   **Response:** `{ "added": int, "circle": object, "stats": object }`
-*   `GET /api/v1/circles`: Retrieves the explored areas (as H3 hexagons) for the current user within a given bounding box.
-    *   **Query Parameter:** `bbox=minLon,minLat,maxLon,maxLat`
-    *   **Response:** `{ "hexagons": [str] }`
-*   `POST /api/v1/radius`: Sets the exploration radius for the current user.
-    *   **Body:** `{ "radius_m": int }`
-    *   **Response:** `{ "updated": int, "h3_resolution": int, "resolution_changed": bool }`
-*   `DELETE /api/v1/circle`: Deletes a specific explored hexagon.
-    *   **Body:** `{ "geokey": str }`
-    *   **Response:** `{ "deleted": int }`
+*   **Frontend:** HTML5, CSS3, JavaScript, MapLibre GL JS
+*   **Backend:** Python 3.11, FastAPI
+*   **Database:** PostgreSQL 15 + PostGIS
+*   **Tools:** Docker, H3 (Uber's Hexagonal Hierarchical Spatial Index)
 
-## Development
+---
 
-### Debug Mode
-
-To make development easier, you can run the application in one of two debug modes:
-
-*   **`NO_AUTH_MODE`:** Bypasses Telegram authentication and uses a fixed local user. This is useful for testing the frontend in a regular web browser. To enable it, set the `NO_AUTH_MODE` environment variable:
-    ```bash
-    export NO_AUTH_MODE=1
-    ```
-*   **`DEBUG_AUTH_MODE`:** Enables the debug authentication flow, which uses a session cookie instead of the `X-Telegram-Init` header. This is useful for debugging the authentication process itself. To enable it, set the `DEBUG_AUTH_MODE` environment variable:
-    ```bash
-    export DEBUG_AUTH_MODE=1
-    ```
-
-When either of these modes is enabled, a debug panel will be visible in the frontend, allowing you to change the exploration radius, delete hexagons, and clear the database.
+*Generated for the City Fog Map Project.*
