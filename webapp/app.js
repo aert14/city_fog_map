@@ -292,7 +292,7 @@
       if (controller.signal.aborted) return;
       console.warn("[leaderboard] Failed to fetch leaderboard:", error);
       leaderboardState.error = "Unable to load leaderboard.";
-      setLeaderboardLoading(false); // Не забываем выключить загрузку при ошибке
+      setLeaderboardLoading(false); // Do not forget to turn off loading on error
     }
   }
 

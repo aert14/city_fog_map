@@ -17,7 +17,7 @@ import h3
 from starlette.middleware.sessions import SessionMiddleware
 from pythonjsonlogger import jsonlogger
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # добавляем services в path
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add services to path
 from common import db as db_module
 from common import models
 import cache

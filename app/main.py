@@ -520,7 +520,6 @@ async def visit_area(
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
-    # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
 
@@ -590,7 +589,6 @@ async def visit_area(
 
 @app.get("/api/v1/circles", response_model=CirclesResponse)
 async def list_circles(bbox: str, user=Depends(get_current_user)):
-    # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info(f"Circles request: bbox={bbox}, user_id={user_id}")
 
@@ -907,11 +905,6 @@ async def reveal_district(
             requested_cells = {str(cell) for cell in cells}
 
     new_hexagons: List[str] = []
-    already_visited = set(
-        db_module.fetch_user_visited_cells_for_district(
-            conn, user_id=user_id, district_id=district_id
-        )
-    )
 
     for h3_index, coverage in base_cells:
         if requested_cells and h3_index not in requested_cells:
@@ -944,7 +937,6 @@ async def get_stats_summary(
             cached_data = await redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"Stats summary cache hit for user {user_id}")
-                # Десериализуем из JSON
                 cached_response = StatsSummaryResponse.model_validate_json(cached_data)
                 return cached_response
         except Exception as e:
@@ -1032,7 +1024,6 @@ async def get_leaderboard(
             cached_data = await redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"Leaderboard cache hit for key: {cache_key}")
-                # Десериализуем из JSON
                 cached_response = LeaderboardResponse.model_validate_json(cached_data)
                 return cached_response
         except Exception as e:

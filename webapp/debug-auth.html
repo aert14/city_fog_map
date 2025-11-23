@@ -17,16 +17,16 @@
   </head>
   <body>
     <div class="card">
-      <h2>Тестовая мини-аппка: проверка аутентификации</h2>
-      <p class="muted">Страница должна открываться только из вебвью Telegram Mini App. Если вы видите ошибку — откройте через кнопку в боте.</p>
-      <div id="status" class="muted">Инициализация…</div>
+      <h2>Test Mini App: Auth Check</h2>
+      <p class="muted">This page should only be opened from a Telegram Mini App webview. If you see an error, open via the bot button.</p>
+      <div id="status" class="muted">Initializing…</div>
       <div id="content" style="display:none">
-        <p class="success">Аутентификация прошла успешно.</p>
+        <p class="success">Authentication successful.</p>
         <pre id="user"></pre>
       </div>
       <div id="error" style="display:none" class="error"></div>
       <div style="margin-top:16px">
-        <button id="retry" style="display:none">Повторить попытку</button>
+        <button id="retry" style="display:none">Retry</button>
       </div>
     </div>
 
@@ -48,19 +48,19 @@
       async function authenticate() {
         try {
           if (!window.Telegram || !window.Telegram.WebApp) {
-            showError('Среда Telegram WebApp не обнаружена. Откройте через бота.');
+            showError('Telegram WebApp environment not found. Open via bot.');
             return;
           }
 
           const initData = window.Telegram.WebApp.initData || '';
           if (!initData) {
-            showError('Отсутствует initData. Откройте через кнопку WebApp в Telegram.');
+            showError('Missing initData. Open via WebApp button in Telegram.');
             return;
           }
 
           window.Telegram.WebApp.ready();
 
-          statusEl.textContent = 'Проверяем подпись…';
+          statusEl.textContent = 'Verifying signature…';
           const res = await fetch('/api/auth', {
             method: 'POST',
             headers: {
@@ -72,25 +72,25 @@
 
           if (!res.ok) {
             const data = await res.json().catch(() => ({}));
-            showError('Доступ запрещён: ' + (data.error || res.status));
+            showError('Access denied: ' + (data.error || res.status));
             return;
           }
 
-          statusEl.textContent = 'Пинг…';
+          statusEl.textContent = 'Ping…';
           const pingRes = await fetch('/api/ping');
           if (!pingRes.ok) {
             showError('Ping failed: ' + pingRes.status);
             return;
           }
 
-          statusEl.textContent = 'Загружаем профиль…';
+          statusEl.textContent = 'Loading profile…';
           const meRes = await fetch('/api/me', { credentials: 'include' });
           const me = await meRes.json();
           contentEl.style.display = 'block';
           statusEl.style.display = 'none';
           userEl.textContent = JSON.stringify(me.user, null, 2);
         } catch (e) {
-          showError('Ошибка: ' + (e && e.message ? e.message : e));
+          showError('Error: ' + (e && e.message ? e.message : e));
         }
       }
 

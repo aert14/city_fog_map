@@ -6,7 +6,7 @@
       "properties": {
         "id": 226927,
         "level": "district",
-        "name_ru": "район Кунцево",
+        "name_ru": "Kuntsevo District",
         "parent_id": 226149,
         "bbox": [
           36.8880788,
@@ -4070,7 +4070,7 @@
       "properties": {
         "id": 240229,
         "level": "district",
-        "name_ru": "район Крылатское",
+        "name_ru": "Krylat-skoye District",
         "parent_id": 226149,
         "bbox": [
           37.36538819999999,
@@ -4310,7 +4310,7 @@
       "properties": {
         "id": 364001,
         "level": "district",
-        "name_ru": "Мещанский район",
+        "name_ru": "Meshchansky District",
         "parent_id": 2162196,
         "bbox": [
           37.6124492,
@@ -4606,7 +4606,7 @@
       "properties": {
         "id": 364551,
         "level": "district",
-        "name_ru": "район Сокольники",
+        "name_ru": "Sokolniki District",
         "parent_id": 1320234,
         "bbox": [
           37.6501162,
@@ -4922,7 +4922,7 @@
       "properties": {
         "id": 428431,
         "level": "district",
-        "name_ru": "район Хорошёво-Мнёвники",
+        "name_ru": "Khoroshyovo-Mnyovniki District",
         "parent_id": 446092,
         "bbox": [
           37.4030883,
@@ -5382,7 +5382,7 @@
       "properties": {
         "id": 431464,
         "level": "district",
-        "name_ru": "район Щукино",
+        "name_ru": "Shchukino District",
         "parent_id": 446092,
         "bbox": [
           37.4461022,
@@ -5574,7 +5574,7 @@
       "properties": {
         "id": 434560,
         "level": "district",
-        "name_ru": "район Строгино",
+        "name_ru": "Strogino District",
         "parent_id": 446092,
         "bbox": [
           37.367239999999995,
@@ -5970,7 +5970,7 @@
       "properties": {
         "id": 442733,
         "level": "district",
-        "name_ru": "район Митино",
+        "name_ru": "Mitino District",
         "parent_id": 446092,
         "bbox": [
           37.332076699999995,
@@ -7010,7 +7010,7 @@
       "properties": {
         "id": 442741,
         "level": "district",
-        "name_ru": "район Куркино",
+        "name_ru": "Kurki District",
         "parent_id": 446092,
         "bbox": [
           37.3617776,
@@ -7530,7 +7530,7 @@
       "properties": {
         "id": 444812,
         "level": "district",
-        "name_ru": "район Кузьминки",
+        "name_ru": "Kuzminki District",
         "parent_id": 1278703,
         "bbox": [
           37.74523249999999,
@@ -7798,7 +7798,7 @@
       "properties": {
         "id": 444908,
         "level": "district",
-        "name_ru": "Донской район",
+        "name_ru": "Donskoy District",
         "parent_id": 1282181,
         "bbox": [
           37.5821396,
@@ -8106,7 +8106,7 @@
       "properties": {
         "id": 445273,
         "level": "district",
-        "name_ru": "район Левобережный",
+        "name_ru": "Levoberezhny District",
         "parent_id": 162903,
         "bbox": [
           37.436483499999994,
@@ -8406,7 +8406,7 @@
       "properties": {
         "id": 445274,
         "level": "district",
-        "name_ru": "район Ховрино",
+        "name_ru": "Khovrino District",
         "parent_id": 162903,
         "bbox": [
           37.46249259999999,
@@ -8542,7 +8542,7 @@
       "properties": {
         "id": 445275,
         "level": "district",
-        "name_ru": "район Западное Дегунино",
+        "name_ru": "Zapadnoye Degunino District",
         "parent_id": 162903,
         "bbox": [
           37.473697,
@@ -8722,7 +8722,7 @@
       "properties": {
         "id": 445276,
         "level": "district",
-        "name_ru": "Тимирязевский район",
+        "name_ru": "Timiryazevsky District",
         "parent_id": 162903,
         "bbox": [
           37.5317779,
@@ -8978,7 +8978,7 @@
       "properties": {
         "id": 445277,
         "level": "district",
-        "name_ru": "район Коптево",
+        "name_ru": "Koptevo District",
         "parent_id": 162903,
         "bbox": [
           37.5048366,
@@ -9234,7 +9234,7 @@
       "properties": {
         "id": 445278,
         "level": "district",
-        "name_ru": "Дмитровский район",
+        "name_ru": "Dmitrovsky District",
         "parent_id": 162903,
         "bbox": [
           37.496254199999996,
@@ -9438,7 +9438,7 @@
       "properties": {
         "id": 445279,
         "level": "district",
-        "name_ru": "район Северное Тушино",
+        "name_ru": "Severnoye Tushino District",
         "parent_id": 446092,
         "bbox": [
           37.39375179999999,
@@ -9638,7 +9638,7 @@
       "properties": {
         "id": 445280,
         "level": "district",
-        "name_ru": "район Сокол",
+        "name_ru": "Sokol District",
         "parent_id": 162903,
         "bbox": [
           37.4868576,
@@ -9742,7 +9742,7 @@
       "properties": {
         "id": 445281,
         "level": "district",
-        "name_ru": "Савёловский район",
+        "name_ru": "Savyolovsky District",
         "parent_id": 162903,
         "bbox": [
           37.5484606,
@@ -9862,7 +9862,7 @@
       "properties": {
         "id": 445282,
         "level": "district",
-        "name_ru": "район Отрадное",
+        "name_ru": "Otradnoye District",
         "parent_id": 1252558,
         "bbox": [
           37.57137099999999,
@@ -10266,7 +10266,7 @@
       "properties": {
         "id": 445283,
         "level": "district",
-        "name_ru": "Молжаниновский район",
+        "name_ru": "Molzhaninovsky District",
         "parent_id": 162903,
         "bbox": [
           37.3313205,
@@ -11146,7 +11146,7 @@
       "properties": {
         "id": 445284,
         "level": "district",
-        "name_ru": "район Северный",
+        "name_ru": "Severny District",
         "parent_id": 1252558,
         "bbox": [
           37.519234899999994,
@@ -11394,7 +11394,7 @@
       "properties": {
         "id": 445285,
         "level": "district",
-        "name_ru": "район Восточное Дегунино",
+        "name_ru": "Vostochnoye Degunino District",
         "parent_id": 162903,
         "bbox": [
           37.5430448,
@@ -11606,7 +11606,7 @@
       "properties": {
         "id": 445297,
         "level": "district",
-        "name_ru": "Головинский район",
+        "name_ru": "Golovinsky District",
         "parent_id": 162903,
         "bbox": [
           37.4644625,
@@ -11810,7 +11810,7 @@
       "properties": {
         "id": 445298,
         "level": "district",
-        "name_ru": "район Беговой",
+        "name_ru": "Begovoy District",
         "parent_id": 162903,
         "bbox": [
           37.5408733,
@@ -11974,7 +11974,7 @@
       "properties": {
         "id": 445299,
         "level": "district",
-        "name_ru": "Хорошёвский район",
+        "name_ru": "Khoroshevsky District",
         "parent_id": 162903,
         "bbox": [
           37.5038208,
@@ -12186,7 +12186,7 @@
       "properties": {
         "id": 446078,
         "level": "district",
-        "name_ru": "Войковский район",
+        "name_ru": "Voykovsky District",
         "parent_id": 162903,
         "bbox": [
           37.471677799999995,
@@ -12438,7 +12438,7 @@
       "properties": {
         "id": 446079,
         "level": "district",
-        "name_ru": "район Аэропорт",
+        "name_ru": "Aeroport District",
         "parent_id": 162903,
         "bbox": [
           37.5110095,
@@ -12562,7 +12562,7 @@
       "properties": {
         "id": 446080,
         "level": "district",
-        "name_ru": "район Южное Тушино",
+        "name_ru": "Yuzhnoye Tushino District",
         "parent_id": 446092,
         "bbox": [
           37.3918335,
@@ -12874,7 +12874,7 @@
       "properties": {
         "id": 446081,
         "level": "district",
-        "name_ru": "район Покровское-Стрешнево",
+        "name_ru": "Pokrovskoye-Streshnevo District",
         "parent_id": 446092,
         "bbox": [
           37.394438799999996,
@@ -13354,7 +13354,7 @@
       "properties": {
         "id": 446082,
         "level": "district",
-        "name_ru": "Бескудниковский район",
+        "name_ru": "Beskuydnikovsky District",
         "parent_id": 162903,
         "bbox": [
           37.52965819999999,
@@ -13570,7 +13570,7 @@
       "properties": {
         "id": 446083,
         "level": "district",
-        "name_ru": "Алтуфьевский район",
+        "name_ru": "Altufyevsky District",
         "parent_id": 1252558,
         "bbox": [
           37.56740469999999,
@@ -13694,7 +13694,7 @@
       "properties": {
         "id": 446084,
         "level": "district",
-        "name_ru": "район Лианозово",
+        "name_ru": "Lianozovo District",
         "parent_id": 1252558,
         "bbox": [
           37.5368342,
@@ -13842,7 +13842,7 @@
       "properties": {
         "id": 446085,
         "level": "district",
-        "name_ru": "район Бибирево",
+        "name_ru": "Bibirevo District",
         "parent_id": 1252558,
         "bbox": [
           37.586677099999996,
@@ -14102,7 +14102,7 @@
       "properties": {
         "id": 446086,
         "level": "district",
-        "name_ru": "район Северное Медведково",
+        "name_ru": "Severnoye Medvedkovo District",
         "parent_id": 1252558,
         "bbox": [
           37.619647699999994,
@@ -14422,7 +14422,7 @@
       "properties": {
         "id": 446087,
         "level": "district",
-        "name_ru": "район Южное Медведково",
+        "name_ru": "Yuzhnoye Medvedkovo District",
         "parent_id": 1252558,
         "bbox": [
           37.6142216,
@@ -14870,7 +14870,7 @@
       "properties": {
         "id": 446111,
         "level": "district",
-        "name_ru": "район Фили-Давыдково",
+        "name_ru": "Fili-Davydkovo District",
         "parent_id": 226149,
         "bbox": [
           37.4379546,
@@ -15370,7 +15370,7 @@
       "properties": {
         "id": 446112,
         "level": "district",
-        "name_ru": "район Филёвский Парк",
+        "name_ru": "Filevsky Park District",
         "parent_id": 226149,
         "bbox": [
           37.42658599999999,
@@ -15730,7 +15730,7 @@
       "properties": {
         "id": 446114,
         "level": "district",
-        "name_ru": "район Дорогомилово",
+        "name_ru": "Dorogomilovo District",
         "parent_id": 226149,
         "bbox": [
           37.489294199999996,
@@ -15950,7 +15950,7 @@
       "properties": {
         "id": 446115,
         "level": "district",
-        "name_ru": "район Раменки",
+        "name_ru": "Ramenki District",
         "parent_id": 226149,
         "bbox": [
           37.4663185,
@@ -16306,7 +16306,7 @@
       "properties": {
         "id": 446271,
         "level": "district",
-        "name_ru": "Ярославский район",
+        "name_ru": "Yaroslavsky District",
         "parent_id": 1252558,
         "bbox": [
           37.663447,
@@ -16722,7 +16722,7 @@
       "properties": {
         "id": 446272,
         "level": "district",
-        "name_ru": "район Ростокино",
+        "name_ru": "Rostokino District",
         "parent_id": 1252558,
         "bbox": [
           37.63201519999999,
@@ -16918,7 +16918,7 @@
       "properties": {
         "id": 455184,
         "level": "district",
-        "name_ru": "район Текстильщики",
+        "name_ru": "Tekstilshchiki District",
         "parent_id": 1278703,
         "bbox": [
           37.7171026,
@@ -17086,7 +17086,7 @@
       "properties": {
         "id": 455203,
         "level": "district",
-        "name_ru": "район Люблино",
+        "name_ru": "Lyublino District",
         "parent_id": 1278703,
         "bbox": [
           37.7131287,
@@ -17502,7 +17502,7 @@
       "properties": {
         "id": 455208,
         "level": "district",
-        "name_ru": "район Капотня",
+        "name_ru": "Kapotnya District",
         "parent_id": 1278703,
         "bbox": [
           37.783447,
@@ -17706,7 +17706,7 @@
       "properties": {
         "id": 455222,
         "level": "district",
-        "name_ru": "район Марьино",
+        "name_ru": "Maryino District",
         "parent_id": 1278703,
         "bbox": [
           37.692906099999995,
@@ -17882,7 +17882,7 @@
       "properties": {
         "id": 455451,
         "level": "district",
-        "name_ru": "район Печатники",
+        "name_ru": "Pechatniki District",
         "parent_id": 1278703,
         "bbox": [
           37.6716027,
@@ -18130,7 +18130,7 @@
       "properties": {
         "id": 455460,
         "level": "district",
-        "name_ru": "район Нагатинский Затон",
+        "name_ru": "Nagatinsky Zaton District",
         "parent_id": 1282181,
         "bbox": [
           37.6534884,
@@ -18302,7 +18302,7 @@
       "properties": {
         "id": 455528,
         "level": "district",
-        "name_ru": "район Москворечье-Сабурово",
+        "name_ru": "Moskvorechye-Saburovo District",
         "parent_id": 1282181,
         "bbox": [
           37.6221414,
@@ -18678,7 +18678,7 @@
       "properties": {
         "id": 455539,
         "level": "district",
-        "name_ru": "район Орехово-Борисово Северное",
+        "name_ru": "Orekhovo-Borisovo Severnoye District",
         "parent_id": 1282181,
         "bbox": [
           37.671285299999994,
@@ -19102,7 +19102,7 @@
       "properties": {
         "id": 456807,
         "level": "district",
-        "name_ru": "район Орехово-Борисово Южное",
+        "name_ru": "Orekhovo-Borisovo Yuzhnoye District",
         "parent_id": 1282181,
         "bbox": [
           37.691405499999995,
@@ -19578,7 +19578,7 @@
       "properties": {
         "id": 531264,
         "level": "district",
-        "name_ru": "район Зябликово",
+        "name_ru": "Zyablikovo District",
         "parent_id": 1282181,
         "bbox": [
           37.727390099999994,
@@ -19866,7 +19866,7 @@
       "properties": {
         "id": 531287,
         "level": "district",
-        "name_ru": "район Братеево",
+        "name_ru": "Brateyevo District",
         "parent_id": 1282181,
         "bbox": [
           37.7271206,
@@ -20166,7 +20166,7 @@
       "properties": {
         "id": 535655,
         "level": "district",
-        "name_ru": "район Нагатино-Садовники",
+        "name_ru": "Nagatino-Sadovniki District",
         "parent_id": 1282181,
         "bbox": [
           37.6218603,
@@ -20342,7 +20342,7 @@
       "properties": {
         "id": 535662,
         "level": "district",
-        "name_ru": "Нагорный район",
+        "name_ru": "Nagorny District",
         "parent_id": 1282181,
         "bbox": [
           37.6035132,
@@ -20634,7 +20634,7 @@
       "properties": {
         "id": 548619,
         "level": "district",
-        "name_ru": "район Выхино-Жулебино",
+        "name_ru": "Vykhino-Zhulebino District",
         "parent_id": 1278703,
         "bbox": [
           37.7871898,
@@ -20970,7 +20970,7 @@
       "properties": {
         "id": 574667,
         "level": "district",
-        "name_ru": "район Вешняки",
+        "name_ru": "Veshnyaki District",
         "parent_id": 1320234,
         "bbox": [
           37.767519,
@@ -21050,7 +21050,7 @@
       "properties": {
         "id": 950639,
         "level": "district",
-        "name_ru": "район Бирюлёво Восточное",
+        "name_ru": "Biryulyovo Vostochnoye District",
         "parent_id": 1282181,
         "bbox": [
           37.6407213,
@@ -21582,7 +21582,7 @@
       "properties": {
         "id": 950641,
         "level": "district",
-        "name_ru": "район Царицыно",
+        "name_ru": "Tsaritsyno District",
         "parent_id": 1282181,
         "bbox": [
           37.6250668,
@@ -21786,7 +21786,7 @@
       "properties": {
         "id": 950658,
         "level": "district",
-        "name_ru": "район Бирюлёво Западное",
+        "name_ru": "Biryulyovo Zapadnoye District",
         "parent_id": 1282181,
         "bbox": [
           37.6131252,
@@ -21974,7 +21974,7 @@
       "properties": {
         "id": 950664,
         "level": "district",
-        "name_ru": "район Чертаново Южное",
+        "name_ru": "Chertanovo Yuzhnoye District",
         "parent_id": 1282181,
         "bbox": [
           37.572939899999994,
@@ -22294,7 +22294,7 @@
       "properties": {
         "id": 951334,
         "level": "district",
-        "name_ru": "район Ясенево",
+        "name_ru": "Yasenovo District",
         "parent_id": 1304596,
         "bbox": [
           37.4883331,
@@ -23058,7 +23058,7 @@
       "properties": {
         "id": 951336,
         "level": "district",
-        "name_ru": "район Тёплый Стан",
+        "name_ru": "Tёply Stan District",
         "parent_id": 1304596,
         "bbox": [
           37.45571869999999,
@@ -23226,7 +23226,7 @@
       "properties": {
         "id": 952191,
         "level": "district",
-        "name_ru": "район Коньково",
+        "name_ru": "Konkovo District",
         "parent_id": 1304596,
         "bbox": [
           37.4985134,
@@ -23422,7 +23422,7 @@
       "properties": {
         "id": 1250526,
         "level": "district",
-        "name_ru": "Алексеевский район",
+        "name_ru": "Alekseyevsky District",
         "parent_id": 1252558,
         "bbox": [
           37.63499999999999,
@@ -23622,7 +23622,7 @@
       "properties": {
         "id": 1250618,
         "level": "district",
-        "name_ru": "район Свиблово",
+        "name_ru": "Sviblovo District",
         "parent_id": 1252558,
         "bbox": [
           37.625088500000004,
@@ -23814,7 +23814,7 @@
       "properties": {
         "id": 1250619,
         "level": "district",
-        "name_ru": "Останкинский район",
+        "name_ru": "Ostankinsky District",
         "parent_id": 1252558,
         "bbox": [
           37.5804063,
@@ -24114,7 +24114,7 @@
       "properties": {
         "id": 1250724,
         "level": "district",
-        "name_ru": "район Марфино",
+        "name_ru": "Marfino District",
         "parent_id": 1252558,
         "bbox": [
           37.5737717,
@@ -24338,7 +24338,7 @@
       "properties": {
         "id": 1252407,
         "level": "district",
-        "name_ru": "район Марьина Роща",
+        "name_ru": "Maryina Roshcha District",
         "parent_id": 1252558,
         "bbox": [
           37.5889044,
@@ -24518,7 +24518,7 @@
       "properties": {
         "id": 1252424,
         "level": "district",
-        "name_ru": "Бутырский район",
+        "name_ru": "Butyrsky District",
         "parent_id": 1252558,
         "bbox": [
           37.57359360000001,
@@ -24714,7 +24714,7 @@
       "properties": {
         "id": 1252448,
         "level": "district",
-        "name_ru": "Лосиноостровский район",
+        "name_ru": "Losinoostrovsky District",
         "parent_id": 1252558,
         "bbox": [
           37.67511089999999,
@@ -24890,7 +24890,7 @@
       "properties": {
         "id": 1252465,
         "level": "district",
-        "name_ru": "Бабушкинский район",
+        "name_ru": "Babushkinsky District",
         "parent_id": 1252558,
         "bbox": [
           37.64172189999999,
@@ -25214,7 +25214,7 @@
       "properties": {
         "id": 1255563,
         "level": "district",
-        "name_ru": "Рязанский район",
+        "name_ru": "Ryazansky District",
         "parent_id": 1278703,
         "bbox": [
           37.73565789999999,
@@ -25346,7 +25346,7 @@
       "properties": {
         "id": 1255576,
         "level": "district",
-        "name_ru": "район Косино-Ухтомский",
+        "name_ru": "Kosino-Ukhtomsky District",
         "parent_id": 1320234,
         "bbox": [
           37.836023899999994,
@@ -25814,7 +25814,7 @@
       "properties": {
         "id": 1255577,
         "level": "district",
-        "name_ru": "район Некрасовка",
+        "name_ru": "Nekrasovka District",
         "parent_id": 1278703,
         "bbox": [
           37.90612759999999,
@@ -26426,7 +26426,7 @@
       "properties": {
         "id": 1255602,
         "level": "district",
-        "name_ru": "район Новокосино",
+        "name_ru": "Novokosino District",
         "parent_id": 1320234,
         "bbox": [
           37.840415699999994,
@@ -26610,7 +26610,7 @@
       "properties": {
         "id": 1255680,
         "level": "district",
-        "name_ru": "район Северное Измайлово",
+        "name_ru": "Severnoye Izmaylovo District",
         "parent_id": 1320234,
         "bbox": [
           37.750848299999994,
@@ -26726,7 +26726,7 @@
       "properties": {
         "id": 1255704,
         "level": "district",
-        "name_ru": "район Восточное Измайлово",
+        "name_ru": "Vostochnoye Izmaylovo District",
         "parent_id": 1320234,
         "bbox": [
           37.79943279999999,
@@ -26846,7 +26846,7 @@
       "properties": {
         "id": 1255775,
         "level": "district",
-        "name_ru": "район Восточный",
+        "name_ru": "Vostochny District",
         "parent_id": 1320234,
         "bbox": [
           37.790034299999995,
@@ -27334,7 +27334,7 @@
       "properties": {
         "id": 1255942,
         "level": "district",
-        "name_ru": "район Замоскворечье",
+        "name_ru": "Zamoskvorechye District",
         "parent_id": 2162196,
         "bbox": [
           37.6150768,
@@ -27526,7 +27526,7 @@
       "properties": {
         "id": 1255987,
         "level": "district",
-        "name_ru": "район Хамовники",
+        "name_ru": "Khamovniki District",
         "parent_id": 2162196,
         "bbox": [
           37.5410812,
@@ -27766,7 +27766,7 @@
       "properties": {
         "id": 1257218,
         "level": "district",
-        "name_ru": "Красносельский район",
+        "name_ru": "Krasnoselsky District",
         "parent_id": 2162196,
         "bbox": [
           37.628351599999995,
@@ -28026,7 +28026,7 @@
       "properties": {
         "id": 1257403,
         "level": "district",
-        "name_ru": "район Южное Бутово",
+        "name_ru": "Yuzhnoye Butovo District",
         "parent_id": 1304596,
         "bbox": [
           37.47018979999999,
@@ -28862,7 +28862,7 @@
       "properties": {
         "id": 1257455,
         "level": "district",
-        "name_ru": "район Северное Бутово",
+        "name_ru": "Severnoye Butovo District",
         "parent_id": 1304596,
         "bbox": [
           37.53684619999999,
@@ -29290,7 +29290,7 @@
       "properties": {
         "id": 1257472,
         "level": "district",
-        "name_ru": "Можайский район",
+        "name_ru": "Mozhaysky District",
         "parent_id": 226149,
         "bbox": [
           37.3262279,
@@ -30254,7 +30254,7 @@
       "properties": {
         "id": 1257484,
         "level": "district",
-        "name_ru": "район Арбат",
+        "name_ru": "Arbat District",
         "parent_id": 2162196,
         "bbox": [
           37.5720599,
@@ -30454,7 +30454,7 @@
       "properties": {
         "id": 1257786,
         "level": "district",
-        "name_ru": "Тверской район",
+        "name_ru": "Tverskoy District",
         "parent_id": 2162196,
         "bbox": [
           37.57523259999999,
@@ -30846,7 +30846,7 @@
       "properties": {
         "id": 1275551,
         "level": "district",
-        "name_ru": "Пресненский район",
+        "name_ru": "Presnensky District",
         "parent_id": 2162196,
         "bbox": [
           37.5139298,
@@ -31226,7 +31226,7 @@
       "properties": {
         "id": 1275608,
         "level": "district",
-        "name_ru": "Таганский район",
+        "name_ru": "Tagansky District",
         "parent_id": 2162196,
         "bbox": [
           37.6320746,
@@ -31538,7 +31538,7 @@
       "properties": {
         "id": 1275627,
         "level": "district",
-        "name_ru": "район Якиманка",
+        "name_ru": "Yakimanka District",
         "parent_id": 2162196,
         "bbox": [
           37.5776083,
@@ -31846,7 +31846,7 @@
       "properties": {
         "id": 1278046,
         "level": "district",
-        "name_ru": "Нижегородский район",
+        "name_ru": "Nizhegorodsky District",
         "parent_id": 1278703,
         "bbox": [
           37.6804437,
@@ -32122,7 +32122,7 @@
       "properties": {
         "id": 1278064,
         "level": "district",
-        "name_ru": "район Лефортово",
+        "name_ru": "Lefortovo District",
         "parent_id": 1278703,
         "bbox": [
           37.6703968,
@@ -32442,7 +32442,7 @@
       "properties": {
         "id": 1278096,
         "level": "district",
-        "name_ru": "Южнопортовый район",
+        "name_ru": "Yuzhnoportovy District",
         "parent_id": 1278703,
         "bbox": [
           37.66069029999999,
@@ -32598,7 +32598,7 @@
       "properties": {
         "id": 1281209,
         "level": "district",
-        "name_ru": "Даниловский район",
+        "name_ru": "Danilovsky District",
         "parent_id": 1282181,
         "bbox": [
           37.6061574,
@@ -32810,7 +32810,7 @@
       "properties": {
         "id": 1281220,
         "level": "district",
-        "name_ru": "Академический район",
+        "name_ru": "Akademichesky District",
         "parent_id": 1304596,
         "bbox": [
           37.5522197,
@@ -32898,7 +32898,7 @@
       "properties": {
         "id": 1281263,
         "level": "district",
-        "name_ru": "район Черёмушки",
+        "name_ru": "Chёrmushki District",
         "parent_id": 1304596,
         "bbox": [
           37.5390605,
@@ -32986,7 +32986,7 @@
       "properties": {
         "id": 1281648,
         "level": "district",
-        "name_ru": "Гагаринский район",
+        "name_ru": "Gagarinsky District",
         "parent_id": 1304596,
         "bbox": [
           37.53005329999999,
@@ -33074,7 +33074,7 @@
       "properties": {
         "id": 1281702,
         "level": "district",
-        "name_ru": "Ломоносовский район",
+        "name_ru": "Lomonosovsky District",
         "parent_id": 1304596,
         "bbox": [
           37.51166239999999,
@@ -33190,7 +33190,7 @@
       "properties": {
         "id": 1292211,
         "level": "district",
-        "name_ru": "район Котловка",
+        "name_ru": "Kotlovka District",
         "parent_id": 1304596,
         "bbox": [
           37.5779862,
@@ -33538,7 +33538,7 @@
       "properties": {
         "id": 1292286,
         "level": "district",
-        "name_ru": "район Зюзино",
+        "name_ru": "Zyuzino District",
         "parent_id": 1304596,
         "bbox": [
           37.563997799999996,
@@ -33686,7 +33686,7 @@
       "properties": {
         "id": 1292499,
         "level": "district",
-        "name_ru": "Обручевский район",
+        "name_ru": "Obruchersky District",
         "parent_id": 1304596,
         "bbox": [
           37.4824662,
@@ -33850,7 +33850,7 @@
       "properties": {
         "id": 1292679,
         "level": "district",
-        "name_ru": "район Проспект Вернадского",
+        "name_ru": "Prospect Vernadskogo District",
         "parent_id": 226149,
         "bbox": [
           37.4737147,
@@ -34286,7 +34286,7 @@
       "properties": {
         "id": 1292749,
         "level": "district",
-        "name_ru": "район Очаково-Матвеевское",
+        "name_ru": "Ochakovo-Matveyevskoye District",
         "parent_id": 226149,
         "bbox": [
           37.4021617,
@@ -34958,7 +34958,7 @@
       "properties": {
         "id": 1298976,
         "level": "district",
-        "name_ru": "район Новогиреево",
+        "name_ru": "Novogireyevo District",
         "parent_id": 1320234,
         "bbox": [
           37.7732108,
@@ -35130,7 +35130,7 @@
       "properties": {
         "id": 1299013,
         "level": "district",
-        "name_ru": "район Перово",
+        "name_ru": "Perovo District",
         "parent_id": 1320234,
         "bbox": [
           37.71961189999999,
@@ -35390,7 +35390,7 @@
       "properties": {
         "id": 1299031,
         "level": "district",
-        "name_ru": "район Соколиная Гора",
+        "name_ru": "Sokol'naya Gora District",
         "parent_id": 1320234,
         "bbox": [
           37.699276399999995,
@@ -35642,7 +35642,7 @@
       "properties": {
         "id": 1299106,
         "level": "district",
-        "name_ru": "район Преображенское",
+        "name_ru": "Preobrazhenskoye District",
         "parent_id": 1320234,
         "bbox": [
           37.698576599999996,
@@ -35878,7 +35878,7 @@
       "properties": {
         "id": 1319060,
         "level": "district",
-        "name_ru": "район Богородское",
+        "name_ru": "Bogorodskoye District",
         "parent_id": 1320234,
         "bbox": [
           37.6702104,
@@ -36154,7 +36154,7 @@
       "properties": {
         "id": 1319078,
         "level": "district",
-        "name_ru": "район Метрогородок",
+        "name_ru": "Metrogorodok District",
         "parent_id": 1320234,
         "bbox": [
           37.6702104,
@@ -36602,7 +36602,7 @@
       "properties": {
         "id": 1319142,
         "level": "district",
-        "name_ru": "район Гольяново",
+        "name_ru": "Golyanovo District",
         "parent_id": 1320234,
         "bbox": [
           37.745928899999996,
@@ -36846,7 +36846,7 @@
       "properties": {
         "id": 1319245,
         "level": "district",
-        "name_ru": "район Измайлово",
+        "name_ru": "Izmaylovo District",
         "parent_id": 1320234,
         "bbox": [
           37.742942299999996,
@@ -37002,7 +37002,7 @@
       "properties": {
         "id": 1319263,
         "level": "district",
-        "name_ru": "район Ивановское",
+        "name_ru": "Ivanovskoye District",
         "parent_id": 1320234,
         "bbox": [
           37.799756099999996,
@@ -37246,7 +37246,7 @@
       "properties": {
         "id": 1320371,
         "level": "district",
-        "name_ru": "район Крюково",
+        "name_ru": "Kryukovo District",
         "parent_id": null,
         "bbox": [
           37.1440873,
@@ -38070,7 +38070,7 @@
       "properties": {
         "id": 1320424,
         "level": "district",
-        "name_ru": "район Старое Крюково",
+        "name_ru": "Staroye Kryukovo District",
         "parent_id": null,
         "bbox": [
           37.1732656,
@@ -38498,7 +38498,7 @@
       "properties": {
         "id": 1320510,
         "level": "district",
-        "name_ru": "район Силино",
+        "name_ru": "Silino District",
         "parent_id": null,
         "bbox": [
           37.131602099999995,
@@ -39110,7 +39110,7 @@
       "properties": {
         "id": 1320566,
         "level": "district",
-        "name_ru": "район Матушкино",
+        "name_ru": "Matushkino District",
         "parent_id": null,
         "bbox": [
           37.1785294,
@@ -39574,7 +39574,7 @@
       "properties": {
         "id": 1320570,
         "level": "district",
-        "name_ru": "район Савёлки",
+        "name_ru": "Savёlki District",
         "parent_id": null,
         "bbox": [
           37.20949949999999,
@@ -40330,7 +40330,7 @@
       "properties": {
         "id": 2162195,
         "level": "district",
-        "name_ru": "Басманный район",
+        "name_ru": "Basmanny District",
         "parent_id": 2162196,
         "bbox": [
           37.627867599999995,

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
-# Absolute project root
-PROJECT_ROOT := /Users/aaivanov/city_fog_map
+# Project root
+PROJECT_ROOT := $(shell pwd)
 
 .PHONY: help up down build logs tunnel tunnel-status password kill clean
 
@@ -21,7 +21,7 @@ help:
 up:
 	@echo "Starting all services..."
 	cd $(PROJECT_ROOT); docker-compose up -d
-	@echo "Services started. Web app available at http://localhost"
+	@echo "Services started. Web app available at http://localhost:8081"
 	@echo "RabbitMQ Management: http://localhost:15672 (guest/guest)"
 
 down:
@@ -36,19 +36,19 @@ logs:
 	cd $(PROJECT_ROOT); docker-compose logs -f
 
 tunnel:
-	@pkill -f "localtunnel.*--port 80" || true
+	@pkill -f "localtunnel.*--port 8081" || true
 	@rm -f /tmp/lt.log /tmp/lt_url.txt
 	@command -v npx >/dev/null 2>&1 || (echo "npx is required. Install Node: sudo apt-get install -y nodejs npm OR use nvm" && exit 1)
-	@echo "Checking if port 80 is accessible..."
-	@curl -s --max-time 5 http://localhost >/dev/null || (echo "ERROR: Port 80 is not accessible. Make sure services are running with 'make up'" && exit 1)
-	@echo "Running localtunnel to :80 (attached)"
+	@echo "Checking if port 8081 is accessible..."
+	@curl -s --max-time 5 http://localhost:8081 >/dev/null || (echo "ERROR: Port 8081 is not accessible. Make sure services are running with 'make up'" && exit 1)
+	@echo "Running localtunnel to :8081 (attached)"
 	@SUBDOMAIN=$${SUBDOMAIN:-aert0}; \
 	echo "Using subdomain: $$SUBDOMAIN"; \
-	npx --yes localtunnel --port 80 --local-host 127.0.0.1 -s "$$SUBDOMAIN" > /tmp/lt.log 2>&1 &
+	npx --yes localtunnel --port 8081 --local-host 127.0.0.1 -s "$$SUBDOMAIN" > /tmp/lt.log 2>&1 &
 	@echo "Tunnel started in background. Use 'make tunnel-status' to check status."
 
 tunnel-status:
-	@if ps aux | grep -q "localtunnel.*--port 80" && [ -f /tmp/lt.log ]; then \
+	@if ps aux | grep -q "localtunnel.*--port 8081" && [ -f /tmp/lt.log ]; then \
 		URL=$$(grep -Eo "https://[a-z0-9-]+\\.loca\\.lt" /tmp/lt.log | head -n 1); \
 		if [ -n "$$URL" ]; then \
 			echo "Tunnel ready: $$URL"; \
@@ -67,7 +67,7 @@ password:
 
 kill:
 	@echo "Stopping tunnel..."
-	@pkill -f "localtunnel.*--port 80" || true
+	@pkill -f "localtunnel.*--port 8081" || true
 	@rm -f /tmp/lt.log /tmp/lt_url.txt
 	@echo "Tunnel stopped and temporary files cleaned."
 

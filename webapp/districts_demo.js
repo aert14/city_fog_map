@@ -9,7 +9,7 @@ window.DEMO_DISTRICTS_DATA = {
       "properties": {
         "id": 226927,
         "level": "district",
-        "name_ru": "район Кунцево",
+        "name_ru": "Kuntsevo District",
         "parent_id": 226149,
         "bbox": [
           36.8880788,
@@ -341,7 +341,7 @@ window.DEMO_DISTRICTS_DATA = {
       "properties": {
         "id": 364001,
         "level": "district",
-        "name_ru": "Мещанский район",
+        "name_ru": "Meshchansky District",
         "parent_id": 2162196,
         "bbox": [
           37.6124492,
@@ -389,7 +389,7 @@ window.DEMO_DISTRICTS_DATA = {
       "properties": {
         "id": 364551,
         "level": "district",
-        "name_ru": "район Сокольники",
+        "name_ru": "Sokolniki District",
         "parent_id": 1320234,
         "bbox": [
           37.6501162,
@@ -439,7 +439,7 @@ window.DEMO_DISTRICTS_DATA = {
       "properties": {
         "id": 226149,
         "level": "okrug",
-        "name_ru": "Западный административный округ",
+        "name_ru": "Western Administrative Okrug",
         "parent_id": null,
         "bbox": [
           36.8880788,
@@ -787,7 +787,7 @@ window.DEMO_DISTRICTS_DATA = {
       "properties": {
         "id": 1320234,
         "level": "okrug",
-        "name_ru": "Восточный административный округ",
+        "name_ru": "Eastern Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.6501162,
@@ -931,7 +931,7 @@ window.DEMO_DISTRICTS_DATA = {
       "properties": {
         "id": 2162196,
         "level": "okrug",
-        "name_ru": "Центральный административный округ",
+        "name_ru": "Central Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.5139298,

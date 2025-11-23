@@ -6,7 +6,7 @@
       "properties": {
         "id": 162903,
         "level": "okrug",
-        "name_ru": "Северный административный округ",
+        "name_ru": "Northern Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.3313205,
@@ -1606,7 +1606,7 @@
       "properties": {
         "id": 226149,
         "level": "okrug",
-        "name_ru": "Западный административный округ",
+        "name_ru": "Western Administrative Okrug",
         "parent_id": null,
         "bbox": [
           36.8880788,
@@ -7382,7 +7382,7 @@
       "properties": {
         "id": 446092,
         "level": "okrug",
-        "name_ru": "Северо-Западный административный округ",
+        "name_ru": "North-Western Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.332076699999995,
@@ -9594,7 +9594,7 @@
       "properties": {
         "id": 1252558,
         "level": "okrug",
-        "name_ru": "Северо-Восточный административный округ",
+        "name_ru": "North-Eastern Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.519234899999994,
@@ -10710,7 +10710,7 @@
       "properties": {
         "id": 1278703,
         "level": "okrug",
-        "name_ru": "Юго-Восточный административный округ",
+        "name_ru": "South-Eastern Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.66069029999999,
@@ -12130,7 +12130,7 @@
       "properties": {
         "id": 1282181,
         "level": "okrug",
-        "name_ru": "Южный административный округ",
+        "name_ru": "Southern Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.5697983,
@@ -13678,7 +13678,7 @@
       "properties": {
         "id": 1304596,
         "level": "okrug",
-        "name_ru": "Юго-Западный административный округ",
+        "name_ru": "South-Western Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.45571869999999,
@@ -15722,7 +15722,7 @@
       "properties": {
         "id": 1320234,
         "level": "okrug",
-        "name_ru": "Восточный административный округ",
+        "name_ru": "Eastern Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.6501162,
@@ -17458,7 +17458,7 @@
       "properties": {
         "id": 2162196,
         "level": "okrug",
-        "name_ru": "Центральный административный округ",
+        "name_ru": "Central Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.5139298,
@@ -18430,7 +18430,7 @@
       "properties": {
         "id": 2263058,
         "level": "okrug",
-        "name_ru": "Новомосковский административный округ",
+        "name_ru": "Novomoskovsky Administrative Okrug",
         "parent_id": null,
         "bbox": [
           37.0872002,
@@ -22570,7 +22570,7 @@
       "properties": {
         "id": 2263059,
         "level": "okrug",
-        "name_ru": "Троицкий административный округ",
+        "name_ru": "Troitsky Administrative Okrug",
         "parent_id": null,
         "bbox": [
           36.8031012,
