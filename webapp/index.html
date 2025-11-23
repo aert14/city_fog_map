@@ -1,109 +1,99 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>City Fog Map</title>
-    <link
-      href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css"
-      rel="stylesheet"
-    />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap"
-      rel="stylesheet"
-    />
-    <link href="/webapp/style.css" rel="stylesheet" />
-  </head>
-  <body>
-    <div id="app">
-      <div id="toolbar">
-        <h1>City Fog Map</h1>
-        <button id="openBtn" class="btn">Explore 50m Around</button>
-        <button id="leaderboardBtn" class="btn btn-secondary">
-          Leaderboard
-        </button>
-        <button id="toggleFogBtn" class="btn" style="display: none">
-          Hide Fog
-        </button>
-        <span id="status"></span>
-        <span class="count-label">Explored: <span id="count">0</span></span>
-        <div id="debugPanel" style="display: none">
-          <button id="deleteModeBtn" class="btn">Delete: Off</button>
-          <button id="selectionToggleBtn" class="btn">Select: On</button>
-          <button id="revealDistrictBtn" class="btn">Reveal District</button>
-          <button id="clearDbBtn" class="btn" title="Clear all data (dev)">
-            Clear DB
-          </button>
-        </div>
-      </div>
 
-      <div id="map-container">
-        <div id="map"></div>
-        <canvas id="fog-canvas"></canvas>
-        <!-- REMOVED: <div id="label-overlay"></div> -->
-        <div id="loader"><div class="spinner"></div></div>
-      </div>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>City Fog Map</title>
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="./style.css" rel="stylesheet" />
+</head>
 
-      <div id="leaderboard-overlay" class="leaderboard-overlay">
-        <div
-          class="leaderboard-panel"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="leaderboardTitle"
-        >
-          <div class="leaderboard-header">
-            <h2 id="leaderboardTitle">Leaderboard</h2>
-            <button
-              id="leaderboardCloseBtn"
-              class="btn btn-ghost"
-              aria-label="Close leaderboard"
-            >
-              ✕
-            </button>
-          </div>
-          <div class="leaderboard-controls">
-            <label class="control">
-              <span>Level</span>
-              <select id="leaderboardLevel">
-                <option value="district">District</option>
-                <option value="okrug">Okrug</option>
-              </select>
-            </label>
-            <label class="control">
-              <span>Period</span>
-              <select id="leaderboardPeriod">
-                <option value="week">Week</option>
-                <option value="season">Season</option>
-              </select>
-            </label>
-          </div>
-          <div id="leaderboardStatus" class="leaderboard-status"></div>
-          <div class="leaderboard-table-wrapper">
-            <table class="leaderboard-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Player</th>
-                  <th>Cells</th>
-                  <th>Weight</th>
-                  <th>% Cells</th>
-                  <th>% Weight</th>
-                </tr>
-              </thead>
-              <tbody id="leaderboardBody"></tbody>
-            </table>
-          </div>
-        </div>
+<body>
+  <div id="app">
+    <div id="toolbar">
+      <h1>City Fog Map</h1>
+      <button id="openBtn" class="btn">Explore 50m Around</button>
+      <button id="leaderboardBtn" class="btn btn-secondary">
+        Leaderboard
+      </button>
+      <button id="toggleFogBtn" class="btn" style="display: none">
+        Hide Fog
+      </button>
+      <span id="status"></span>
+      <span class="count-label">Explored: <span id="count">0</span></span>
+      <div id="debugPanel" style="display: none">
+        <button id="deleteModeBtn" class="btn">Delete: Off</button>
+        <button id="selectionToggleBtn" class="btn">Select: On</button>
+        <button id="revealDistrictBtn" class="btn">Reveal District</button>
+        <button id="clearDbBtn" class="btn" title="Clear all data (dev)">
+          Clear DB
+        </button>
       </div>
     </div>
 
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
-    <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
-    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
-    <script src="/webapp/fog.js"></script>
-    <script src="/webapp/app.js"></script>
-  </body>
+    <div id="map-container">
+      <div id="map"></div>
+      <canvas id="fog-canvas"></canvas>
+      <!-- REMOVED: <div id="label-overlay"></div> -->
+      <div id="loader">
+        <div class="spinner"></div>
+      </div>
+    </div>
+
+    <div id="leaderboard-overlay" class="leaderboard-overlay">
+      <div class="leaderboard-panel" role="dialog" aria-modal="true" aria-labelledby="leaderboardTitle">
+        <div class="leaderboard-header">
+          <h2 id="leaderboardTitle">Leaderboard</h2>
+          <button id="leaderboardCloseBtn" class="btn btn-ghost" aria-label="Close leaderboard">
+            ✕
+          </button>
+        </div>
+        <div class="leaderboard-controls">
+          <label class="control">
+            <span>Level</span>
+            <select id="leaderboardLevel">
+              <option value="district">District</option>
+              <option value="okrug">Okrug</option>
+            </select>
+          </label>
+          <label class="control">
+            <span>Period</span>
+            <select id="leaderboardPeriod">
+              <option value="week">Week</option>
+              <option value="season">Season</option>
+            </select>
+          </label>
+        </div>
+        <div id="leaderboardStatus" class="leaderboard-status"></div>
+        <div class="leaderboard-table-wrapper">
+          <table class="leaderboard-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Player</th>
+                <th>Cells</th>
+                <th>Weight</th>
+                <th>% Cells</th>
+                <th>% Weight</th>
+              </tr>
+            </thead>
+            <tbody id="leaderboardBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <script src="./fog.js"></script>
+  <script src="./app.js"></script>
+</body>
+
 </html>
