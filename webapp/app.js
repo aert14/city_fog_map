@@ -21,19 +21,18 @@
     animationSpeed: 0.0015,
   };
 
-  // --- Map Initialization ---
   const map = new maplibregl.Map({
     container: "map",
     style:
       "https://api.maptiler.com/maps/pastel/style.json?key=TFV5uV6DVVucu16gTZdi",
-    center: [37.16, 55.75], // Centered on Kuntsevo for testing
-    zoom: 10, // Zoomed out slightly to see more
+    center: [37.16, 55.75],
+    zoom: 10,
     maxBounds: [
       [36.0, 55.0],
       [39.0, 56.5],
     ],
   });
-  window.mapInstance = map; // Expose for debugging
+  window.mapInstance = map;
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
   const geolocate = new maplibregl.GeolocateControl({
     positionOptions: { enableHighAccuracy: true },
@@ -49,7 +48,6 @@
   } catch (_) { }
   map.addControl(geolocate);
 
-  // --- Application State ---
   const allKnownHexagons = new Set();
   let isFetching = false;
   let fogEnabled = true;
@@ -90,16 +88,15 @@
   let selectedDistrictResView = null;
   const DEFAULT_STATUS_TEXT = "Select a district";
   const districtFeatureMap = new Map();
-  window.districtFeatureMap = districtFeatureMap; // Expose for debugging
+  window.districtFeatureMap = districtFeatureMap;
   const okrugFeatureMap = new Map();
-  window.okrugFeatureMap = okrugFeatureMap; // Expose for debugging
+  window.okrugFeatureMap = okrugFeatureMap;
   const districtCellsCache = new Map();
   let statusOverrideMessage = null;
 
-  // --- NEW: Spatial Index for Hexagons ---
   const spatialIndex = new Map();
-  const GRID_SIZE = 0.25; // Size of the grid cell in degrees. Tune if needed.
-  let fogDataChanged = false; // Flag to track changes in fog data
+  const GRID_SIZE = 0.25;
+  let fogDataChanged = false;
 
   function getGridKey(lat, lng) {
     const gridX = Math.floor(lng / GRID_SIZE);
@@ -116,7 +113,7 @@
         spatialIndex.set(key, new Set());
       }
       spatialIndex.get(key).add(hexId);
-      fogDataChanged = true; // Mark data as changed
+      fogDataChanged = true;
     } catch (e) {
       console.warn(`Failed to add hex ${hexId} to spatial index`, e);
     }
@@ -132,13 +129,12 @@
         if (spatialIndex.get(key).size === 0) {
           spatialIndex.delete(key);
         }
-        fogDataChanged = true; // Mark data as changed
+        fogDataChanged = true;
       }
     } catch (e) {
       console.warn(`Failed to remove hex ${hexId} from spatial index`, e);
     }
   }
-  // --- END: Spatial Index ---
 
   const leaderboardState = {
     isOpen: false,
@@ -300,24 +296,14 @@
     }
   }
 
-  // --- Функция-помощник (отсутствовала в оригинале, нужна для работы updateDistrictProgress) ---
-  function formatProgressSuffix(feature) {
-    if (!feature || !feature.properties) return "";
-    const p = feature.properties.percent_cells;
-    return typeof p === 'number' && p > 0 ? `${Math.round(p)}%` : "";
-  }
-
-  // --- Новая отдельная функция для обновления прогресса (вынесена из fetchLeaderboard) ---
   function updateDistrictProgress(districtStats, okrugStats) {
     let needsRedraw = false;
 
-    // Update district stats
     if (districtStats && typeof districtStats.id === "number") {
       const districtId = districtStats.id;
       const districtFeature = districtFeatureMap.get(districtId);
 
       if (districtFeature) {
-        // Update progress properties
         if (typeof districtStats.visited_cells === "number") {
           districtFeature.properties.visited_cells = districtStats.visited_cells;
         }
@@ -325,7 +311,6 @@
           districtFeature.properties.visited_weight = districtStats.visited_weight;
         }
 
-        // Calculate percentages if we have the data
         const totalCells = districtFeature.properties.total_cells;
         const totalWeight = districtFeature.properties.total_weight;
         if (typeof totalCells === "number" && totalCells > 0) {
@@ -335,7 +320,6 @@
           districtFeature.properties.percent_weight = Math.min(100, (districtStats.visited_weight / totalWeight) * 100);
         }
 
-        // Update overlay suffix for map display
         if (typeof formatProgressSuffix === 'function') {
           districtFeature.properties.overlay_suffix = formatProgressSuffix(districtFeature);
         }
@@ -343,12 +327,10 @@
       }
     }
 
-    // Update okrug stats
     if (okrugStats && typeof okrugStats.id === "number") {
       const okrugId = okrugStats.id;
       const okrugFeature = okrugFeatureMap.get(okrugId);
       if (okrugFeature) {
-        // Update progress properties
         if (typeof okrugStats.visited_cells === "number") {
           okrugFeature.properties.visited_cells = okrugStats.visited_cells;
         }
@@ -356,7 +338,6 @@
           okrugFeature.properties.visited_weight = okrugStats.visited_weight;
         }
 
-        // Calculate percentages if we have the data
         const totalCells = okrugFeature.properties.total_cells;
         const totalWeight = okrugFeature.properties.total_weight;
         if (typeof totalCells === "number" && totalCells > 0) {
@@ -370,7 +351,6 @@
       }
     }
 
-    // Redraw map if any updates were made
     if (needsRedraw) {
       const districtSource = map.getSource(ADMIN_SOURCES.districts);
       if (districtSource) {
@@ -382,7 +362,6 @@
         okrugSource.setData(toFeatureCollection(Array.from(okrugFeatureMap.values())));
       }
 
-      // Update status if currently selected district was affected
       if (selectedDistrictId != null) {
         const updatedFeature = districtFeatureMap.get(selectedDistrictId);
         if (updatedFeature) {
@@ -468,7 +447,6 @@
       });
     }
 
-    // --- UPDATED: NATIVE MAPLIBRE LABELS ---
     if (!map.getLayer(ADMIN_LAYERS.districtLabels)) {
       map.addLayer({
         id: ADMIN_LAYERS.districtLabels,
@@ -503,7 +481,6 @@
         },
       });
     }
-    // --- END UPDATED ---
 
     if (!map.getLayer(ADMIN_LAYERS.districtBorders)) {
       map.addLayer({
@@ -942,12 +919,6 @@
           sourceFeatures.forEach(f => {
             const id = f.id || f.properties?.id;
             if (id != null) {
-              // Ensure geometry is present (querySourceFeatures might return simplified geometry)
-              // But for point-in-polygon we need it.
-              // Note: querySourceFeatures returns tiled features, geometry might be clipped.
-              // This is risky but better than nothing.
-              // Actually, querySourceFeatures returns features in the viewport.
-              // If we clicked, the feature is in viewport.
               districtFeatureMap.set(id, f);
             }
           });
@@ -962,10 +933,6 @@
         for (const [id, f] of districtFeatureMap.entries()) {
           checkedCount++;
           if (f.geometry) {
-            // querySourceFeatures returns geometry in tile coordinates? No, usually GeoJSON source returns original if not tiled?
-            // But MapLibre tiles GeoJSON.
-            // If geometry is tiled, turf might fail or give wrong results.
-            // However, we have no other choice if the map is empty.
             try {
               const isInside = turf.booleanPointInPolygon(point, f);
               if (isInside) {
@@ -974,7 +941,6 @@
                 break;
               }
             } catch (e) {
-              // Ignore geometry errors
             }
           }
         }
@@ -1243,17 +1209,14 @@
 
   let cloudPattern = null;
 
-  // Initialize texture worker
   const textureWorker = new Worker('texture.worker.js');
   textureWorker.postMessage({ width: 512, height: 512 });
 
   textureWorker.onmessage = function (e) {
     if (e.data.bitmap) {
-      // Create pattern from the generated ImageBitmap
       cloudPattern = fogCtx.createPattern(e.data.bitmap, "repeat");
       console.log('Cloud texture generated and pattern created');
     } else if (e.data.imageData) {
-      // Fallback for environments without OffscreenCanvas support
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = 512;
       tempCanvas.height = 512;
@@ -1265,31 +1228,30 @@
   };
 
   function drawFogLoop() {
-    if (!cloudPattern) return; // Wait for texture to be ready
+    if (!cloudPattern) return;
 
     animationTime++;
     FogModule.drawFog(
       fogCtx,
       map,
       fogEnabled,
-      spatialIndex, // Pass spatial index instead of all hexagons
+      spatialIndex,
       animationTime,
       FOG_CONFIG,
       DPR,
       cloudPattern,
-      GRID_SIZE, // Pass grid size to the module
-      fogDataChanged // Pass data change flag
+      GRID_SIZE,
+      fogDataChanged
     );
-    fogDataChanged = false; // Reset the flag after drawing
+    fogDataChanged = false;
   }
 
-  // Force immediate fog redraw
   function forceFogRedraw() {
     if (!cloudPattern) return;
     const wasChanged = fogDataChanged;
-    fogDataChanged = true; // Temporarily set to force redraw
+    fogDataChanged = true;
     drawFogLoop();
-    fogDataChanged = wasChanged; // Restore original state
+    fogDataChanged = wasChanged;
   }
 
   async function addVisitAt(lat, lng) {
@@ -1301,21 +1263,18 @@
     if (!response.ok) {
       throw new Error(`Server error: ${response.statusText}`);
     }
-    // 1. Calculate H3 geokey locally from the coordinates
+
     const h3Resolution = window.currentH3Resolution || defaultVisitResolution;
     const h3Geokey = h3.latLngToCell(lat, lng, h3Resolution);
-    // 2. Send request to server (API call remains the same)
-    const result = await response.json(); // <-- `result` is now used only for stats update, not for `h3_geokey`
+    const result = await response.json();
     if (h3Geokey && !allKnownHexagons.has(h3Geokey)) {
       allKnownHexagons.add(h3Geokey);
       addToSpatialIndex(h3Geokey);
     }
 
-    // Update district progress with stats from response
     if (result.stats) {
       updateDistrictProgress(result.stats.district, result.stats.okrug);
 
-      // Update the main counter with server stats
       countEl.textContent =
         result.stats && typeof result.stats.total_circles === "number"
           ? result.stats.total_circles.toLocaleString()
@@ -1367,7 +1326,6 @@
     }
   }
 
-  // --- Rest of the code ---
   const loader = document.getElementById("loader");
   async function updateHexagonsFromServer() {
     if (isFetching) return;
@@ -1657,7 +1615,6 @@
     map.triggerRepaint();
   });
 
-  // Debug UI
   const deleteModeBtn = document.getElementById("deleteModeBtn");
   const clearDbBtn = document.getElementById("clearDbBtn");
   const debugPanel = document.getElementById("debugPanel");
