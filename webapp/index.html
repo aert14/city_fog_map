@@ -92,6 +92,95 @@
   <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+
+  <!-- Demo Mode Configuration -->
+  <script>
+    // Detect if running outside Telegram
+    const isInTelegram = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData;
+
+    // Enable demo mode when NOT in Telegram
+    window.noAuthMode = !isInTelegram;
+    window.debugAuthMode = false;
+    window.baseVisitResolution = 10;
+
+    // Mock API for demo mode
+    if (window.noAuthMode) {
+      console.log('[Demo Mode] Running in standalone mode without Telegram auth');
+
+      // Store demo data in localStorage
+      const DEMO_STORAGE_KEY = 'city_fog_demo_data';
+
+      window.apiFetch = async function (url, options = {}) {
+        console.log('[Demo API]', options.method || 'GET', url);
+
+        // Return empty/mock responses for all API calls
+        if (url.includes('/api/v1/circles')) {
+          const stored = localStorage.getItem(DEMO_STORAGE_KEY);
+          const data = stored ? JSON.parse(stored) : { circles: [] };
+          return new Response(JSON.stringify(data.circles || []), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        if (url.includes('/api/v1/visit') && options.method === 'POST') {
+          const body = JSON.parse(options.body);
+          const stored = localStorage.getItem(DEMO_STORAGE_KEY);
+          const data = stored ? JSON.parse(stored) : { circles: [] };
+
+          // Add new circle
+          const newCircle = {
+            geokey: `demo_${Date.now()}`,
+            lat: body.lat,
+            lon: body.lon
+          };
+          data.circles = data.circles || [];
+          data.circles.push(newCircle);
+          localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(data));
+
+          return new Response(JSON.stringify({
+            circle: newCircle,
+            stats: { total_circles: data.circles.length }
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        if (url.includes('/api/v1/districts')) {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        if (url.includes('/api/v1/leaderboard')) {
+          return new Response(JSON.stringify({ entries: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Default empty response
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      };
+
+      window.getAuthHeaders = function (headers = {}) {
+        return headers;
+      };
+    } else {
+      // Normal mode - use fetch
+      window.apiFetch = fetch.bind(window);
+      window.getAuthHeaders = function (headers = {}) {
+        // Add auth headers in production
+        return headers;
+      };
+    }
+  </script>
+
   <script src="./fog.js"></script>
   <script src="./app.js"></script>
 </body>
