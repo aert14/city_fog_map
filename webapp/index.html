@@ -103,6 +103,24 @@
     window.debugAuthMode = false;
     window.baseVisitResolution = 10;
 
+    // Mock geolocation for demo mode
+    window.demoMockPosition = {
+      lat: 55.7558, // Center of Moscow
+      lon: 37.6173,
+      enabled: !isInTelegram
+    };
+  </script>
+
+  <!-- Load demo districts data if in demo mode -->
+  <script>
+    if (window.noAuthMode) {
+      const script = document.createElement('script');
+      script.src = './districts_demo.js';
+      document.currentScript.parentNode.insertBefore(script, document.currentScript.nextSibling);
+    }
+  </script>
+
+  <script>
     // Mock API for demo mode
     if (window.noAuthMode) {
       console.log('[Demo Mode] Running in standalone mode without Telegram auth');
@@ -110,23 +128,53 @@
       // Store demo data in localStorage
       const DEMO_STORAGE_KEY = 'city_fog_demo_data';
 
+      // Helper to get demo district data
+      function getDemoDistrictsData() {
+        return window.DEMO_DISTRICTS_DATA || { districts: [], okrugs: [] };
+      }
+
+      // Helper to format district for API response
+      function formatDistrictForAPI(feature, visitedCells = 0) {
+        const totalCells = 100; // Mock value
+        const totalWeight = 150.0;
+        const visitedWeight = (visitedCells / totalCells) * totalWeight;
+
+        return {
+          id: feature.properties.id,
+          name: feature.properties.name_ru,
+          level: feature.properties.level,
+          parent_id: feature.properties.parent_id,
+          bbox: feature.properties.bbox,
+          geom: feature.geometry,
+          progress: {
+            visited_cells: visitedCells,
+            total_cells: totalCells,
+            visited_weight: visitedWeight,
+            total_weight: totalWeight,
+            percent_cells: (visitedCells / totalCells) * 100,
+            percent_weight: (visitedWeight / totalWeight) * 100
+          }
+        };
+      }
+
       window.apiFetch = async function (url, options = {}) {
         console.log('[Demo API]', options.method || 'GET', url);
 
-        // Return empty/mock responses for all API calls
+        // Return mock circles
         if (url.includes('/api/v1/circles')) {
           const stored = localStorage.getItem(DEMO_STORAGE_KEY);
-          const data = stored ? JSON.parse(stored) : { circles: [] };
+          const data = stored ? JSON.parse(stored) : { circles: [], visitedByDistrict: {} };
           return new Response(JSON.stringify(data.circles || []), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
           });
         }
 
+        // Handle visit POST
         if (url.includes('/api/v1/visit') && options.method === 'POST') {
           const body = JSON.parse(options.body);
           const stored = localStorage.getItem(DEMO_STORAGE_KEY);
-          const data = stored ? JSON.parse(stored) : { circles: [] };
+          const data = stored ? JSON.parse(stored) : { circles: [], visitedByDistrict: {} };
 
           // Add new circle
           const newCircle = {
@@ -136,26 +184,157 @@
           };
           data.circles = data.circles || [];
           data.circles.push(newCircle);
+
+          // Update visited cells count (mock - just increment)
+          data.totalVisited = (data.totalVisited || 0) + 1;
+
+          localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(data));
+
+          // Calculate updated stats
+          const demoData = getDemoDistrictsData();
+          // Find district for this location (simplified: just pick random or last used)
+          // In a real mock we'd do point-in-polygon, but here we can just simulate an update
+          // for the currently selected district if any, or just return generic stats.
+          // Since we don't know the selected district ID here easily without more state,
+          // we'll just return a generic structure that app.js expects.
+
+          // However, to make the UI update, we need to return stats for the *current* district.
+          // Let's assume the client will handle the update if we return valid structure.
+          // Better: let's store visited count per district in localStorage.
+
+          // Simple mock: just return a dummy district stat that increments
+          const mockDistrictId = 226927; // Kuntsevo
+          const currentVisited = (data.visitedByDistrict && data.visitedByDistrict[mockDistrictId]) || 0;
+          const newVisited = currentVisited + 1;
+
+          if (!data.visitedByDistrict) data.visitedByDistrict = {};
+          data.visitedByDistrict[mockDistrictId] = newVisited;
+
           localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(data));
 
           return new Response(JSON.stringify({
+            added: 1,
             circle: newCircle,
-            stats: { total_circles: data.circles.length }
+            stats: {
+              total_circles: data.circles.length,
+              district: {
+                id: mockDistrictId,
+                progress: {
+                  visited_cells: newVisited,
+                  total_cells: 100,
+                  percent_cells: (newVisited / 100) * 100,
+                  visited_weight: (newVisited / 100) * 150,
+                  total_weight: 150,
+                  percent_weight: (newVisited / 100) * 100
+                }
+              },
+              okrug: null
+            }
           }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
           });
         }
 
-        if (url.includes('/api/v1/districts')) {
-          return new Response(JSON.stringify([]), {
+        // Handle districts list
+        if (url.includes('/api/v1/districts/all')) {
+          const demoData = getDemoDistrictsData();
+          const stored = localStorage.getItem(DEMO_STORAGE_KEY);
+          const visitData = stored ? JSON.parse(stored) : { visitedByDistrict: {} };
+
+          const allFeatures = [...demoData.districts, ...demoData.okrugs];
+          const response = allFeatures.map(feature => {
+            const districtId = feature.properties.id;
+            const visitedCells = visitData.visitedByDistrict[districtId] || Math.floor(Math.random() * 20);
+            return formatDistrictForAPI(feature, visitedCells);
+          });
+
+          return new Response(JSON.stringify(response), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
           });
         }
 
+        if (url.includes('/api/v1/districts?')) {
+          const demoData = getDemoDistrictsData();
+          const stored = localStorage.getItem(DEMO_STORAGE_KEY);
+          const visitData = stored ? JSON.parse(stored) : { visitedByDistrict: {} };
+
+          // Parse level from query string
+          const urlObj = new URL(url, window.location.origin);
+          const level = urlObj.searchParams.get('level') || 'district';
+
+          const features = level === 'okrug' ? demoData.okrugs : demoData.districts;
+          const response = features.map(feature => {
+            const districtId = feature.properties.id;
+            const visitedCells = visitData.visitedByDistrict[districtId] || Math.floor(Math.random() * 20);
+            return formatDistrictForAPI(feature, visitedCells);
+          });
+
+          return new Response(JSON.stringify(response), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Handle district cells
+        if (url.match(/\/api\/v1\/district\/(\d+)\/cells/)) {
+          const match = url.match(/\/api\/v1\/district\/(\d+)\/cells/);
+          const districtId = parseInt(match[1]);
+
+          // Return mock cells for the district
+          const mockCells = [];
+          for (let i = 0; i < 50; i++) {
+            mockCells.push({
+              h3: `demo_hex_${districtId}_${i}`,
+              coverage: Math.random(),
+              visited: Math.random() > 0.7
+            });
+          }
+
+          // Get stored visit data
+          const stored = localStorage.getItem(DEMO_STORAGE_KEY);
+          const data = stored ? JSON.parse(stored) : { visitedByDistrict: {} };
+          const visitedCount = (data.visitedByDistrict && data.visitedByDistrict[districtId]) || 0;
+
+          return new Response(JSON.stringify({
+            district_id: districtId,
+            resolution: 10,
+            base_resolution: 10,
+            cells: mockCells,
+            district: {
+              progress: {
+                visited_cells: visitedCount,
+                total_cells: 100,
+                percent_cells: (visitedCount / 100) * 100,
+                visited_weight: (visitedCount / 100) * 150,
+                total_weight: 150,
+                percent_weight: (visitedCount / 100) * 100
+              }
+            }
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Handle leaderboard
         if (url.includes('/api/v1/leaderboard')) {
-          return new Response(JSON.stringify({ entries: [] }), {
+          return new Response(JSON.stringify({
+            level: 'district',
+            period: 'week',
+            entries: [
+              {
+                rank: 1,
+                user_id: 1,
+                username: 'Demo User',
+                visited_cells: 45,
+                visited_weight: 67.5,
+                percent_cells: 15.0,
+                percent_weight: 15.0
+              }
+            ]
+          }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
           });
