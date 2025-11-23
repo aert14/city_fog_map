@@ -59,6 +59,24 @@
   window.currentH3Resolution = defaultVisitResolution;
   let ignoreNextClick = false;
   const emptyFeatureCollection = { type: "FeatureCollection", features: [] };
+  const ADMIN_SOURCES = {
+    okrugs: "admin-okrug",
+    districts: "admin-district",
+    selected: "admin-selected",
+    districtHex: "admin-district-hex",
+  };
+  const ADMIN_LAYERS = {
+    okrugFill: "admin-okrug-fill",
+    okrugBorders: "admin-okrug-borders",
+    districtFill: "admin-district-fill",
+    districtHitArea: "admin-district-hit-area",
+    districtLabels: "admin-district-labels",
+    districtBorders: "admin-district-borders",
+    selectedFill: "admin-selected-fill",
+    selectedOutline: "admin-selected-outline",
+    hexFill: "admin-hex-fill",
+    hexOutline: "admin-hex-outline",
+  };
   const ADMIN_FETCH_DEBOUNCE_MS = 360;
   const ADMIN_FETCH_IDLE_MS = 120;
   let adminUpdateTimer = null;
@@ -219,6 +237,25 @@
     }
   }
 
+  function handleLeaderboardLevelChange() {
+    leaderboardState.level = leaderboardLevelSelect.value;
+    fetchLeaderboard();
+  }
+
+  function handleLeaderboardPeriodChange() {
+    leaderboardState.period = leaderboardPeriodSelect.value;
+    fetchLeaderboard();
+  }
+
+  function handleLeaderboardKey(event) {
+    if (!leaderboardState.isOpen) return;
+
+    if (event.key === "Escape") {
+      hideLeaderboard();
+      event.preventDefault();
+    }
+  }
+
   async function fetchLeaderboard() {
     if (!leaderboardState.isOpen) return;
 
@@ -256,81 +293,103 @@
       if (controller.signal.aborted) return;
       console.warn("[leaderboard] Failed to fetch leaderboard:", error);
       leaderboardState.error = "Unable to load leaderboard.";
-      // Update progress properties
-      if (typeof districtStats.visited_cells === "number") {
-        districtFeature.properties.visited_cells = districtStats.visited_cells;
-      }
-      if (typeof districtStats.visited_weight === "number") {
-        districtFeature.properties.visited_weight = districtStats.visited_weight;
-      }
-
-      // Calculate percentages if we have the data
-      const totalCells = districtFeature.properties.total_cells;
-      const totalWeight = districtFeature.properties.total_weight;
-      if (typeof totalCells === "number" && totalCells > 0) {
-        districtFeature.properties.percent_cells = Math.min(100, (districtStats.visited_cells / totalCells) * 100);
-      }
-      if (typeof totalWeight === "number" && totalWeight > 0) {
-        districtFeature.properties.percent_weight = Math.min(100, (districtStats.visited_weight / totalWeight) * 100);
-      }
-
-      // Update overlay suffix for map display
-      districtFeature.properties.overlay_suffix = formatProgressSuffix(districtFeature);
-      needsRedraw = true;
+      setLeaderboardLoading(false); // Не забываем выключить загрузку при ошибке
     }
   }
 
-  // Update okrug stats
-  if (okrugStats && typeof okrugStats.id === "number") {
-    const okrugId = okrugStats.id;
-    const okrugFeature = okrugFeatureMap.get(okrugId);
-    if (okrugFeature) {
-      // Update progress properties
-      if (typeof okrugStats.visited_cells === "number") {
-        okrugFeature.properties.visited_cells = okrugStats.visited_cells;
-      }
-      if (typeof okrugStats.visited_weight === "number") {
-        okrugFeature.properties.visited_weight = okrugStats.visited_weight;
-      }
-
-      // Calculate percentages if we have the data
-      const totalCells = okrugFeature.properties.total_cells;
-      const totalWeight = okrugFeature.properties.total_weight;
-      if (typeof totalCells === "number" && totalCells > 0) {
-        okrugFeature.properties.percent_cells = Math.min(100, (okrugStats.visited_cells / totalCells) * 100);
-      }
-      if (typeof totalWeight === "number" && totalWeight > 0) {
-        okrugFeature.properties.percent_weight = Math.min(100, (okrugStats.visited_weight / totalWeight) * 100);
-      }
-
-      // Note: Okrugs don't have overlay_suffix in the current implementation
-      needsRedraw = true;
-    }
+  // --- Функция-помощник (отсутствовала в оригинале, нужна для работы updateDistrictProgress) ---
+  function formatProgressSuffix(feature) {
+     if (!feature || !feature.properties) return "";
+     const p = feature.properties.percent_cells;
+     return typeof p === 'number' && p > 0 ? `${Math.round(p)}%` : "";
   }
 
-  // Redraw map if any updates were made
-  if (needsRedraw) {
-    const districtSource = map.getSource(ADMIN_SOURCES.districts);
-    if (districtSource) {
-      districtSource.setData(toFeatureCollection(Array.from(districtFeatureMap.values())));
+  // --- Новая отдельная функция для обновления прогресса (вынесена из fetchLeaderboard) ---
+  function updateDistrictProgress(districtStats, okrugStats) {
+    let needsRedraw = false;
+
+    // Update district stats
+    if (districtStats && typeof districtStats.id === "number") {
+      const districtId = districtStats.id;
+      const districtFeature = districtFeatureMap.get(districtId);
+
+      if (districtFeature) {
+        // Update progress properties
+        if (typeof districtStats.visited_cells === "number") {
+          districtFeature.properties.visited_cells = districtStats.visited_cells;
+        }
+        if (typeof districtStats.visited_weight === "number") {
+          districtFeature.properties.visited_weight = districtStats.visited_weight;
+        }
+
+        // Calculate percentages if we have the data
+        const totalCells = districtFeature.properties.total_cells;
+        const totalWeight = districtFeature.properties.total_weight;
+        if (typeof totalCells === "number" && totalCells > 0) {
+          districtFeature.properties.percent_cells = Math.min(100, (districtStats.visited_cells / totalCells) * 100);
+        }
+        if (typeof totalWeight === "number" && totalWeight > 0) {
+          districtFeature.properties.percent_weight = Math.min(100, (districtStats.visited_weight / totalWeight) * 100);
+        }
+
+        // Update overlay suffix for map display
+        if (typeof formatProgressSuffix === 'function') {
+            districtFeature.properties.overlay_suffix = formatProgressSuffix(districtFeature);
+        }
+        needsRedraw = true;
+      }
     }
 
-    const okrugSource = map.getSource(ADMIN_SOURCES.okrugs);
-    if (okrugSource) {
-      okrugSource.setData(toFeatureCollection(Array.from(okrugFeatureMap.values())));
+    // Update okrug stats
+    if (okrugStats && typeof okrugStats.id === "number") {
+      const okrugId = okrugStats.id;
+      const okrugFeature = okrugFeatureMap.get(okrugId);
+      if (okrugFeature) {
+        // Update progress properties
+        if (typeof okrugStats.visited_cells === "number") {
+          okrugFeature.properties.visited_cells = okrugStats.visited_cells;
+        }
+        if (typeof okrugStats.visited_weight === "number") {
+          okrugFeature.properties.visited_weight = okrugStats.visited_weight;
+        }
+
+        // Calculate percentages if we have the data
+        const totalCells = okrugFeature.properties.total_cells;
+        const totalWeight = okrugFeature.properties.total_weight;
+        if (typeof totalCells === "number" && totalCells > 0) {
+          okrugFeature.properties.percent_cells = Math.min(100, (okrugStats.visited_cells / totalCells) * 100);
+        }
+        if (typeof totalWeight === "number" && totalWeight > 0) {
+          okrugFeature.properties.percent_weight = Math.min(100, (okrugStats.visited_weight / totalWeight) * 100);
+        }
+
+        needsRedraw = true;
+      }
     }
 
-    // Update status if currently selected district was affected
-    if (selectedDistrictId != null) {
-      const updatedFeature = districtFeatureMap.get(selectedDistrictId);
-      if (updatedFeature) {
-        selectedDistrictFeature = cloneFeature(updatedFeature);
-        selectedDistrictName = selectedDistrictFeature.properties?.name || selectedDistrictName;
-        updateStatusForSelection();
+    // Redraw map if any updates were made
+    if (needsRedraw) {
+      const districtSource = map.getSource(ADMIN_SOURCES.districts);
+      if (districtSource) {
+        districtSource.setData(toFeatureCollection(Array.from(districtFeatureMap.values())));
+      }
+
+      const okrugSource = map.getSource(ADMIN_SOURCES.okrugs);
+      if (okrugSource) {
+        okrugSource.setData(toFeatureCollection(Array.from(okrugFeatureMap.values())));
+      }
+
+      // Update status if currently selected district was affected
+      if (selectedDistrictId != null) {
+        const updatedFeature = districtFeatureMap.get(selectedDistrictId);
+        if (updatedFeature) {
+          selectedDistrictFeature = cloneFeature(updatedFeature);
+          selectedDistrictName = selectedDistrictFeature.properties?.name || selectedDistrictName;
+          updateStatusForSelection();
+        }
       }
     }
   }
-}
 
   function ensureAdminSourcesAndLayers() {
   if (!map.getSource(ADMIN_SOURCES.okrugs)) {
