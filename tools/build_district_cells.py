@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
-"""Compute H3 coverage for Moscow districts and store in SQLite.
-
-This utility reads district geometries from GeoJSON, performs an H3 polyfill
-at the configured base resolution, estimates coverage of every hexagon within
-each district, and persists the results into the `district_cells` table. The
-script also updates aggregate statistics (`total_cells`, `total_weight`) in the
-`districts` table.
-
-Usage example:
-
-    python tools/build_district_cells.py \
-        --geojson /path/to/data/moscow_districts.geojson \
-        --database /path/to/db.sqlite3
-
-The script requires the `h3`, `shapely`, and `pyproj` packages.
-"""
+"""Compute H3 coverage for Moscow districts and store in SQLite."""
 
 from __future__ import annotations
 
@@ -141,11 +126,9 @@ def project_geometry(geom: BaseGeometry, transformer: Transformer) -> BaseGeomet
 
 def cell_polygon(h3_index: str) -> Polygon:
     boundary_latlon = h3_basic.cell_to_boundary(h3_index)
-    # H3 returns (lat, lon); shapely expects (lon, lat)
     coords = [(lon, lat) for lat, lon in boundary_latlon]
     if not coords:
         raise ValueError(f"Empty boundary for cell {h3_index}")
-    # Ensure closure
     if coords[0] != coords[-1]:
         coords.append(coords[0])
     return Polygon(coords)
@@ -191,7 +174,6 @@ def compute_coverages(
         district_proj = project_geometry(feature.geometry, transformer)
         district_coverages: Dict[str, float] = {}
         for h3_index, coverage in iter_cell_coverages(district_proj, hexes, transformer):
-            # Guarantee single row per district/cell as required
             district_coverages[h3_index] = coverage
         coverages[feature.district_id] = district_coverages
         district_names[feature.district_id] = feature.name

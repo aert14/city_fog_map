@@ -13,14 +13,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import ValidationError
 import h3
 from starlette.middleware.sessions import SessionMiddleware
 from pythonjsonlogger import jsonlogger
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # добавляем services в path
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add services to path
 from common import db as db_module
 from common import models
 import cache
@@ -32,31 +29,21 @@ import tracing
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Remove any existing handlers
 for handler in logger.handlers[:]:
     logger.removeHandler(handler)
 
-# Create JSON formatter
 json_formatter = jsonlogger.JsonFormatter()
-
-# Create stream handler for stdout
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(json_formatter)
-
-# Add handler to logger
 logger.addHandler(stream_handler)
 
-# Setup OpenTelemetry tracing
 tracing.setup_tracing("monolith")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_BOT_TOKEN:
-    # Do not crash on import; raise on first guarded route.
     pass
 
-# Debug mode toggle: when enabled, only debug auth endpoints are active
 DEBUG_AUTH_MODE = os.getenv("DEBUG_AUTH_MODE", "0") == "1"
-# No-auth local mode: bypass Telegram auth and use a fixed local user
 NO_AUTH_MODE = os.getenv("NO_AUTH_MODE", "0") == "1"
 
 
@@ -299,13 +286,10 @@ async def get_current_user(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     logger.info("🚀 City Fog Map API starting up...")
 
-    # Initialize Redis
     await cache.init_redis_pool()
 
-    # Initialize database
     logger.info("Database initialization...")
     conn = db_module.get_connection()
     db_module.init_db(conn)
@@ -313,21 +297,16 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     logger.info("🛑 City Fog Map API shutting down...")
-
-    # Close Redis connection
     await cache.close_redis_pool()
 
 app = FastAPI(title="City Fog Map API", version="0.1.0", lifespan=lifespan)
 
-# Add Prometheus metrics
 from prometheus_fastapi_instrumentator import Instrumentator
 instrumentator = Instrumentator()
 instrumentator.instrument(app)
 instrumentator.expose(app)
 
-# Static frontend at /webapp
 webapp_dir = "/webapp"
 if not os.path.isdir(webapp_dir):
     os.makedirs(webapp_dir, exist_ok=True)
@@ -364,19 +343,16 @@ def _read_index_with_version() -> str:
         logger.error(f"Failed to read index.html: {e}")
         return "<html><body>index missing</body></html>"
 
-# Redirect root to the appropriate page
 @app.get("/")
 async def root_redirect():
     if DEBUG_AUTH_MODE:
         return RedirectResponse(url="/webapp/debug-auth.html")
     return RedirectResponse(url="/webapp/")
 
-# Sessions for debug auth flow
 SESSION_SECRET = os.getenv("SESSION_SECRET", os.urandom(32).hex())
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 
 
-# Simple request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.perf_counter()
@@ -438,7 +414,6 @@ async def visit_area(
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
-    # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info(f"Visit request: lat={body.lat}, lon={body.lon}, user_id={user_id}")
 
@@ -458,7 +433,6 @@ async def visit_area(
             okrug=None,
         )
 
-        # Инвалидируем кэш статистики пользователя
         if redis_client:
             try:
                 cache_key = f"user:{user_id}:stats_summary"
@@ -497,7 +471,6 @@ async def visit_area(
         okrug=models.RegionStats(**stats_dict["okrug"]) if stats_dict.get("okrug") else None,
     )
 
-    # Инвалидируем кэш статистики пользователя
     if redis_client:
         try:
             cache_key = f"user:{user_id}:stats_summary"
@@ -518,7 +491,6 @@ async def visit_area(
 
 @app.get("/api/v1/circles", response_model=models.CirclesResponse)
 async def list_circles(bbox: str, user=Depends(get_current_user)):
-    # DEBUG_AUTH_MODE check is now in get_current_user
     user_id, _ = user
     logger.info(f"Circles request: bbox={bbox}, user_id={user_id}")
 
@@ -534,7 +506,6 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
 
     conn = db_module.get_connection()
 
-    # Debug: get all user hexagons first
     all_user_hexagons = db_module.select_user_hexes(conn, user_id)
     logger.info(f"User {user_id} has {len(all_user_hexagons)} total hexagons")
 
@@ -548,8 +519,6 @@ async def list_circles(bbox: str, user=Depends(get_current_user)):
     )
 
     logger.info(f"Circles response: {len(hexagons)} hexagons returned in bbox")
-    if len(hexagons) > 0:
-        logger.info(f"Sample hexagons: {hexagons[:3]}")
     return models.CirclesResponse(hexagons=hexagons)
 
 
@@ -560,10 +529,6 @@ async def delete_circle(body: models.DeleteCircleRequest, user=Depends(get_curre
     deleted = db_module.delete_visit_by_hex(conn, user_id=user_id, h3_index=body.geokey)
     return {"deleted": int(deleted)}
 
-
-# -------------------------
-# Debug auth endpoints
-# -------------------------
 
 @app.post("/api/auth")
 async def debug_auth(body: models.AuthRequest, request: Request):
@@ -635,7 +600,6 @@ async def debug_mode():
     }
 
 
-# Dev utility: clear entire database (allowed only in debug/no-auth)
 @app.post("/api/v1/dev/clear-db")
 async def dev_clear_db():
     if not (DEBUG_AUTH_MODE or NO_AUTH_MODE):
@@ -893,17 +857,13 @@ async def get_stats_summary(
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
     user_id, _ = user
-
-    # Формируем уникальный ключ для кэша
     cache_key = f"user:{user_id}:stats_summary"
 
-    # Проверяем кэш
     if redis_client:
         try:
             cached_data = await redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"Stats summary cache hit for user {user_id}")
-                # Десериализуем из JSON
                 cached_response = models.StatsSummaryResponse.model_validate_json(cached_data)
                 return cached_response
         except Exception as e:
@@ -911,7 +871,6 @@ async def get_stats_summary(
 
     logger.info(f"Stats summary cache miss for user {user_id}")
 
-    # Cache miss - выполняем запрос к базе данных
     conn = db_module.get_connection()
 
     totals = db_module.fetch_user_total_progress(conn, user_id=user_id)
@@ -963,7 +922,6 @@ async def get_stats_summary(
         bottom_districts=bottom_districts,
     )
 
-    # Сохраняем в кэш с TTL 3600 секунд
     if redis_client:
         try:
             await redis_client.setex(cache_key, 3600, response.model_dump_json())
@@ -984,18 +942,15 @@ async def get_leaderboard(
     user=Depends(get_current_user),
     redis_client: Optional[Redis] = Depends(cache.get_redis),
 ):
-    _ = user  # currently unused but validates auth
+    _ = user
 
-    # Формируем уникальный ключ для кэша
     cache_key = f"leaderboard:{level}:{period}:{limit}"
 
-    # Проверяем кэш
     if redis_client:
         try:
             cached_data = await redis_client.get(cache_key)
             if cached_data:
                 logger.info(f"Leaderboard cache hit for key: {cache_key}")
-                # Десериализуем из JSON
                 cached_response = models.LeaderboardResponse.model_validate_json(cached_data)
                 return cached_response
         except Exception as e:
@@ -1003,7 +958,6 @@ async def get_leaderboard(
 
     logger.info(f"Leaderboard cache miss for key: {cache_key}")
 
-    # Cache miss - выполняем запрос к базе данных
     conn = db_module.get_connection()
     total_cells, total_weight = db_module.get_total_cells_and_weight(conn, level=level)
 
@@ -1054,7 +1008,6 @@ async def get_leaderboard(
             entries=entries,
         )
 
-    # Сохраняем в кэш
     if redis_client:
         try:
             await redis_client.setex(cache_key, 300, response.model_dump_json())

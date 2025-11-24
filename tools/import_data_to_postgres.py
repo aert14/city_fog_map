@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""Import Moscow boundaries and compute H3 coverage for PostgreSQL.
-
-This script loads district and okrug geometries from GeoJSON files,
-computes H3 coverage at the configured resolution, and stores everything
-in PostgreSQL with PostGIS.
-"""
-
 import json
 import logging
 import os
@@ -24,7 +17,6 @@ MIN_PRIMARY_COVERAGE = 0.5
 
 
 def get_connection():
-    """Get PostgreSQL connection."""
     DATABASE_URL = os.getenv("DATABASE_URL")
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable is not set")
@@ -32,7 +24,6 @@ def get_connection():
 
 
 def load_geojson_features(path: Path) -> List[Dict]:
-    """Load features from GeoJSON file."""
     LOG.info("Loading features from %s", path)
     with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -42,7 +33,6 @@ def load_geojson_features(path: Path) -> List[Dict]:
 
 
 def insert_districts(conn, features: List[Dict], level: str) -> None:
-    """Insert districts/okrugs into database."""
     with conn.cursor() as cur:
         for feature in features:
             props = feature.get("properties", {})
@@ -51,11 +41,9 @@ def insert_districts(conn, features: List[Dict], level: str) -> None:
             parent_id = props.get("parent_id")
             bbox = props.get("bbox", [])
 
-            # Convert geometry to PostGIS format
             geom = shape(feature["geometry"])
             geom_wkt = geom.wkt
 
-            # Insert district
             cur.execute("""
                 INSERT INTO districts (id, level, name_ru, parent_id, geom, geom_geojson,
                                      bbox_min_lon, bbox_min_lat, bbox_max_lon, bbox_max_lat)
@@ -84,27 +72,21 @@ def insert_districts(conn, features: List[Dict], level: str) -> None:
 
 
 def compute_h3_coverage(district_geom: BaseGeometry, resolution: int) -> Dict[str, float]:
-    """Compute H3 coverage for a district geometry."""
-    # Convert to GeoJSON for H3
     geojson_geom = json.loads(json.dumps(district_geom.__geo_interface__))
 
-    # Get H3 cells that cover the district
     h3shape = h3.geo_to_h3shape(geojson_geom)
     hexes = h3.h3shape_to_cells(h3shape, resolution)
 
     coverages = {}
     for h3_index in hexes:
-        # Get cell boundary
-        boundary = h3.cell_to_boundary(h3_index)  # Returns [(lat, lng), ...]
+        boundary = h3.cell_to_boundary(h3_index)
 
-        # Create polygon from boundary
-        coords = [(lng, lat) for lat, lng in boundary]  # Shapely expects (x, y)
-        coords.append(coords[0])  # Close the polygon
+        coords = [(lng, lat) for lat, lng in boundary]
+        coords.append(coords[0])
 
         from shapely.geometry import Polygon
         cell_geom = Polygon(coords)
 
-        # Calculate intersection
         intersection = cell_geom.intersection(district_geom)
         if not intersection.is_empty:
             coverage = intersection.area / cell_geom.area
@@ -115,12 +97,10 @@ def compute_h3_coverage(district_geom: BaseGeometry, resolution: int) -> Dict[st
 
 
 def compute_and_store_coverage(conn, district_id: int, geom: BaseGeometry, resolution: int) -> Tuple[int, float]:
-    """Compute H3 coverage for district and store in database."""
     LOG.info("Computing H3 coverage for district %d", district_id)
 
     coverages = compute_h3_coverage(geom, resolution)
 
-    # Insert coverage data
     with conn.cursor() as cur:
         coverage_values = [(district_id, h3_index, coverage) for h3_index, coverage in coverages.items()]
 
@@ -131,11 +111,9 @@ def compute_and_store_coverage(conn, district_id: int, geom: BaseGeometry, resol
                 ON CONFLICT (district_id, h3) DO UPDATE SET coverage = EXCLUDED.coverage
             """, coverage_values)
 
-        # Calculate totals
         total_cells = sum(1 for coverage in coverages.values() if coverage >= MIN_PRIMARY_COVERAGE)
         total_weight = sum(coverages.values())
 
-        # Update district totals
         cur.execute("""
             UPDATE districts
             SET total_cells = %s, total_weight = %s
@@ -149,18 +127,14 @@ def compute_and_store_coverage(conn, district_id: int, geom: BaseGeometry, resol
 
 def main():
     logging.basicConfig(level=logging.INFO)
-
-    # Connect to database
     conn = get_connection()
 
     try:
-        # Initialize database schema
         import sys
         sys.path.append('/app')
         from app.db import init_db
         init_db(conn)
 
-        # Load and insert okrugs
         okrug_path = Path("data/moscow_okrugs.geojson")
         if okrug_path.exists():
             okrug_features = load_geojson_features(okrug_path)
@@ -168,13 +142,11 @@ def main():
         else:
             LOG.warning("Okrug data file not found: %s", okrug_path)
 
-        # Load and insert districts
         district_path = Path("data/moscow_districts.geojson")
         if district_path.exists():
             district_features = load_geojson_features(district_path)
             insert_districts(conn, district_features, "district")
 
-            # Compute H3 coverage for districts
             for feature in district_features:
                 district_id = feature["properties"]["id"]
                 geom = shape(feature["geometry"])

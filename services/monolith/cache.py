@@ -5,12 +5,10 @@ from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 
-# Глобальный клиент Redis
 redis_client: Optional[Redis] = None
 
 
 async def init_redis_pool() -> None:
-    """Инициализирует пул соединений Redis"""
     global redis_client
 
     redis_url = os.getenv("REDIS_URL")
@@ -20,7 +18,6 @@ async def init_redis_pool() -> None:
 
     try:
         redis_client = Redis.from_url(redis_url)
-        # Проверяем соединение
         await redis_client.ping()
         logger.info("Redis connection established successfully")
     except Exception as e:
@@ -29,7 +26,6 @@ async def init_redis_pool() -> None:
 
 
 async def close_redis_pool() -> None:
-    """Закрывает пул соединений Redis"""
     global redis_client
 
     if redis_client:
@@ -43,5 +39,4 @@ async def close_redis_pool() -> None:
 
 
 async def get_redis() -> Optional[Redis]:
-    """Зависимость FastAPI для получения клиента Redis"""
     return redis_client

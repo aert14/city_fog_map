@@ -6,12 +6,12 @@ import redis
 
 logger = logging.getLogger(__name__)
 
-# Глобальный клиент Redis
+# Global Redis client
 redis_client: Optional[Redis] = None
 
 
 async def init_redis_pool() -> None:
-    """Инициализирует пул соединений Redis"""
+    """Initializes Redis connection pool"""
     global redis_client
 
     redis_url = os.getenv("REDIS_URL")
@@ -21,7 +21,7 @@ async def init_redis_pool() -> None:
 
     try:
         redis_client = Redis.from_url(redis_url)
-        # Проверяем соединение
+        # Check connection
         await redis_client.ping()
         logger.info("Redis connection established successfully")
     except Exception as e:
@@ -30,7 +30,7 @@ async def init_redis_pool() -> None:
 
 
 async def close_redis_pool() -> None:
-    """Закрывает пул соединений Redis"""
+    """Closes Redis connection pool"""
     global redis_client
 
     if redis_client:
@@ -44,12 +44,12 @@ async def close_redis_pool() -> None:
 
 
 async def get_redis() -> Optional[Redis]:
-    """Зависимость FastAPI для получения клиента Redis"""
+    """FastAPI dependency to get Redis client"""
     return redis_client
 
 
 def get_redis_sync() -> Optional[redis.Redis]:
-    """Возвращает синхронный клиент Redis для использования в синхронном коде"""
+    """Returns synchronous Redis client for use in synchronous code"""
     redis_url = os.getenv("REDIS_URL")
     if not redis_url:
         return None
@@ -62,7 +62,7 @@ def get_redis_sync() -> Optional[redis.Redis]:
 
 
 def init_redis_sync() -> None:
-    """Синхронная инициализация Redis для использования в синхронном коде"""
+    """Synchronous Redis initialization for use in synchronous code"""
     global redis_client
 
     redis_url = os.getenv("REDIS_URL")
@@ -72,7 +72,7 @@ def init_redis_sync() -> None:
 
     try:
         import asyncio
-        # Создаем новый event loop для async операций
+        # Create new event loop for async operations
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
